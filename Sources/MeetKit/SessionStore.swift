@@ -38,6 +38,8 @@ public struct Session: Equatable, Sendable {
         if let title = meta.title { return title }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
         return "Call \(formatter.string(from: meta.startedAt))"
     }
 }
@@ -50,6 +52,8 @@ public struct SessionStore: Sendable {
     public func createSession(at date: Date) throws -> Session {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmm"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
         let base = formatter.string(from: date)
         let fm = FileManager.default
         try fm.createDirectory(at: rootDir, withIntermediateDirectories: true)
