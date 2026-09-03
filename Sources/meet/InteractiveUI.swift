@@ -3,7 +3,10 @@ import Dispatch
 import Foundation
 import MeetKit
 
-final class InteractiveUI {
+// @unchecked Sendable: every field that's touched from more than one thread
+// (currentJob, pendingJobs) is only ever read or mutated while holding
+// `stateLock`; everything else is confined to the main control loop.
+final class InteractiveUI: @unchecked Sendable {
     private let config: Config
     private let store: SessionStore
     private let pipeline: Pipeline
@@ -19,7 +22,10 @@ final class InteractiveUI {
     private var currentJob: String?   // "2026-09-03-1420 (transcribing mic)"
     private var shouldQuit = false
 
-    static var sigintCount = 0
+    // nonisolated(unsafe): only ever incremented (never read-modify-written
+    // in a way that needs atomicity) from the SIGINT handler and polled from
+    // the main loop; a torn read at worst delays quit-detection by one tick.
+    nonisolated(unsafe) static var sigintCount = 0
 
     init(config: Config) {
         self.config = config
