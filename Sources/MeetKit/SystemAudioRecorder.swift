@@ -28,6 +28,12 @@ public enum SystemAudioError: Error, LocalizedError {
 
 /// Records the system audio mixdown via a CoreAudio process tap (macOS 14.2+).
 /// Playback is untouched: the tap listens post-mix, nothing is rerouted.
+///
+/// Single-use: call `start()` once and `stop()` once per instance. `stopped`
+/// latches permanently once `stop()` runs and is never reset, so a second
+/// `start()` on the same instance will not resume capture — create a new
+/// `SystemAudioRecorder` for a new recording. This matches how Task 12 uses
+/// it: one fresh instance per session.
 public final class SystemAudioRecorder {
     private let outputURL: URL
     private var writer: WavWriter?
@@ -41,11 +47,12 @@ public final class SystemAudioRecorder {
     /// Guards `_paused`, `_isHealthy`, and `_stopped` — touched from both
     /// the HAL IO thread (via the IOProc block) and the main queue (via the
     /// default-device listener block and public callers). The IOProc's own
-    /// write/finalize race is already closed by a hard barrier
-    /// (`AudioDeviceStop`/`AudioDeviceDestroyIOProcID` in
-    /// `teardownCaptureChain()` run, and are documented to block until no
-    /// further IOProc callback fires, before `stop()` ever reaches
-    /// `writer?.finalize()`), so this lock does not need to cover `writer`.
+    /// write/finalize race is already closed by a hard barrier:
+    /// `teardownCaptureChain()`'s calls to `AudioDeviceStop` and
+    /// `AudioDeviceDestroyIOProcID` are documented to block until no
+    /// further IOProc callback can fire, and `stop()` always runs
+    /// `teardownCaptureChain()` before it reaches `writer?.finalize()` — so
+    /// this lock does not need to cover `writer`.
     private let stateLock = NSLock()
     private var _paused = false
     private var _isHealthy = true

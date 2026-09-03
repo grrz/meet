@@ -2,6 +2,12 @@ import AVFoundation
 import Foundation
 
 /// Records the default input device into a WAV via AVAudioEngine.
+///
+/// Single-use: call `start()` once and `stop()` once per instance. `stopped`
+/// latches permanently once `stop()` runs and is never reset, so a second
+/// `start()` on the same instance will not resume capture — create a new
+/// `MicRecorder` for a new recording. This matches how Task 12 uses it: one
+/// fresh instance per session.
 public final class MicRecorder {
     private let engine = AVAudioEngine()
     private let outputURL: URL
@@ -102,7 +108,11 @@ public final class MicRecorder {
             setHealthy(false)
             return
         }
-        writer?.updateSourceFormat(newFormat)
+        // Locked: a straggler tap callback from the outgoing tap may still
+        // be inside writeLocked(), using the writer's current converter,
+        // when this runs — without the lock both threads could mutate the
+        // same AVAudioConverter/AVAudioFile at once.
+        stateLock.withLock { writer?.updateSourceFormat(newFormat) }
         installTap(format: newFormat)
         do {
             try engine.start()
