@@ -7,8 +7,21 @@ struct Meet: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "meet",
         abstract: "Record meetings (mic + system audio) and transcribe them locally.",
-        subcommands: [DebugRecord.self]
+        subcommands: [RecordCommand.self, DebugRecord.self],
+        defaultSubcommand: RecordCommand.self
     )
+}
+
+struct RecordCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "record",
+        abstract: "Interactive recording mode (z: start/stop, space: pause, q: quit)."
+    )
+
+    func run() throws {
+        let config = try Config.loadDefault()
+        try InteractiveUI(config: config).run()
+    }
 }
 
 /// Hidden capture smoke test: records N seconds of mic + system audio and
