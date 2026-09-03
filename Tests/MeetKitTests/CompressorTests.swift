@@ -31,4 +31,26 @@ final class CompressorTests: XCTestCase {
         XCTAssertEqual(Double(readBack.length) / readBack.fileFormat.sampleRate,
                        0.5, accuracy: 0.1)
     }
+
+    func testCompressWithInvalidWavLeavesSourceAndCleansM4a() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmp-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Create a non-audio "WAV" file (junk data).
+        let junkWav = dir.appendingPathComponent("junk.wav")
+        try "this is not audio data".write(to: junkWav, atomically: true, encoding: .utf8)
+
+        let m4a = dir.appendingPathComponent("output.m4a")
+
+        // Attempt compress; should throw.
+        XCTAssertThrowsError(try AudioCompressor.compress(wav: junkWav, to: m4a))
+
+        // Verify source junk file still exists (not deleted on error).
+        XCTAssertTrue(FileManager.default.fileExists(atPath: junkWav.path))
+
+        // Verify no partial m4a remains.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: m4a.path))
+    }
 }
