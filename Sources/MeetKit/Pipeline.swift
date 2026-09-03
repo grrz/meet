@@ -76,9 +76,9 @@ public struct Pipeline: Sendable {
     private func log(session: Session, _ message: String) {
         let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
         if let handle = try? FileHandle(forWritingTo: session.logFile) {
-            try? handle.seekToEnd()
+            _ = try? handle.seekToEnd()
             handle.write(line.data(using: .utf8)!)
-            try? handle.close()
+            _ = try? handle.close()
         } else {
             FileManager.default.createFile(atPath: session.logFile.path,
                                            contents: line.data(using: .utf8))
