@@ -37,4 +37,27 @@ final class ConfigTests: XCTestCase {
         let cfg = try Config.load(path: path)
         XCTAssertFalse(cfg.recordingsDir.path.contains("~"))
     }
+
+    func testMalformedTOMLThrows() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("config.toml")
+        try "recordings_dir = [unclosed".write(to: path, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try Config.load(path: path))
+    }
+
+    func testIntegerMergeGapSeconds() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("config.toml")
+        try """
+        [transcript]
+        merge_gap_seconds = 2
+        """.write(to: path, atomically: true, encoding: .utf8)
+
+        let cfg = try Config.load(path: path)
+        XCTAssertEqual(cfg.transcript.mergeGapSeconds, 2.0)
+    }
 }
