@@ -53,7 +53,14 @@ final class InteractiveUI: @unchecked Sendable {
         // Drain background transcriptions before exiting.
         let waiting = stateLock.withLock { pendingJobs > 0 || currentJob != nil }
         if waiting {
-            print("\nwaiting for transcriptions to finish (Ctrl+C again to abandon)...")
+            // How many more Ctrl+Cs it takes to reach the _exit depends on
+            // how we got here: quitting with `q`/Ctrl+D leaves sigintCount at
+            // 0, so "again" would be wrong — two are needed from a standing
+            // start. Only a first Ctrl+C makes a single further one enough.
+            let hint = InteractiveUI.sigintCount == 0
+                ? "Ctrl+C twice to abandon"
+                : "Ctrl+C again to abandon"
+            print("\nwaiting for transcriptions to finish (\(hint))...")
         }
         pipelineGroup.wait()
         print("\nbye")

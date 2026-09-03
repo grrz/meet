@@ -32,6 +32,16 @@ public struct SessionMeta: Codable, Equatable, Sendable {
     public var audioDurationSeconds: Double?
     public var engineCommand: String?
     public var title: String?
+    /// When each recorder actually began capturing. The two tracks do not
+    /// start together — the system tap is started first so a missing TCC
+    /// grant surfaces before the mic prompts — so `startedAt` alone cannot
+    /// align them. Optional, and decoded with `decodeIfPresent`, so
+    /// `meta.json` files written before these fields existed still load.
+    ///
+    /// Second-resolution: the session store encodes dates as plain ISO8601,
+    /// which has no fractional part — same as `startedAt`/`endedAt`.
+    public var micStartedAt: Date?
+    public var systemStartedAt: Date?
 
     public init(startedAt: Date, stage: Stage = .recording) {
         self.startedAt = startedAt

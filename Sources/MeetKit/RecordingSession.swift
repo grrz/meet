@@ -36,12 +36,18 @@ public final class RecordingSession {
         mic = MicRecorder(outputURL: session.micWAV)
         system = SystemAudioRecorder(outputURL: session.systemWAV)
         try system.start()  // fail fast on missing TCC before touching the mic
+        meta.systemStartedAt = Date()
         do {
             try mic.start()
         } catch {
             system.stop()
             throw error
         }
+        meta.micStartedAt = Date()
+        // Re-save now that both start timestamps exist. The initial save above
+        // still happens first, so a crash during startup leaves a recoverable
+        // session folder either way.
+        try session.saveMeta(meta)
     }
 
     /// Pauses both recorders and opens a pause interval. No-op if already paused.

@@ -1,6 +1,25 @@
 import AVFoundation
 import Foundation
 
+/// Errors thrown by `MicRecorder`.
+public enum MicRecorderError: Error, LocalizedError {
+    /// The input node reports an unusable format (0 Hz and/or 0 channels),
+    /// which is what AVAudioEngine does when there is no input device at all.
+    case noInputDevice(sampleRate: Double, channelCount: AVAudioChannelCount)
+
+    public var errorDescription: String? {
+        switch self {
+        case .noInputDevice(let sampleRate, let channelCount):
+            """
+            No input device available: the system reports \(channelCount) \
+            channel(s) at \(Int(sampleRate)) Hz for the default microphone. \
+            Connect a microphone, or pick one under System Settings → Sound → \
+            Input, then retry.
+            """
+        }
+    }
+}
+
 /// Records the default input device into a WAV via AVAudioEngine.
 ///
 /// Single-use: call `start()` once and `stop()` once per instance. `stopped`
@@ -54,6 +73,13 @@ public final class MicRecorder {
     public func start() throws {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
+        // With no input device the node reports 0 Hz / 0 channels, and
+        // WavWriter would then fail with a bare converterCreationFailed that
+        // says nothing about the actual problem. Name it here instead.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw MicRecorderError.noInputDevice(sampleRate: format.sampleRate,
+                                                 channelCount: format.channelCount)
+        }
         let writer = try WavWriter(url: outputURL, sourceFormat: format)
         self.writer = writer
         installTap(format: format)
