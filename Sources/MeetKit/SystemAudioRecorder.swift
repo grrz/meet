@@ -43,10 +43,15 @@ public final class SystemAudioRecorder {
     private var tapFormat: AVAudioFormat?
     private var defaultDeviceListenerInstalled = false
     private var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Nominal-sample-rate listener on the aggregate device, reinstalled with
+    /// every chain build and removed by every teardown.
+    private var rateListenerBlock: AudioObjectPropertyListenerBlock?
+    private var rateListenerDeviceID = AudioObjectID(kAudioObjectUnknown)
 
     /// Guards `_paused`, `_isHealthy`, and `_stopped` — touched from both
     /// the HAL IO thread (via the IOProc block) and the main queue (via the
-    /// default-device listener block and public callers). The IOProc's own
+    /// default-device and sample-rate listener blocks and public callers).
+    /// The IOProc's own
     /// write/finalize race is already closed by a hard barrier:
     /// `teardownCaptureChain()`'s calls to `AudioDeviceStop` and
     /// `AudioDeviceDestroyIOProcID` are documented to block until no
@@ -65,10 +70,10 @@ public final class SystemAudioRecorder {
 
     public var isHealthy: Bool { stateLock.withLock { _isHealthy } }
 
-    /// Set once by `stop()`; checked by the default-device listener block
-    /// so a device-change notification already queued on the main queue
-    /// before `stop()` ran can't rebuild a brand-new tap + aggregate device
-    /// after the caller considers capture over.
+    /// Set once by `stop()`; checked by both listener blocks so a
+    /// notification already queued on the main queue before `stop()` ran
+    /// can't rebuild a brand-new tap + aggregate device after the caller
+    /// considers capture over.
     private var stopped: Bool {
         get { stateLock.withLock { _stopped } }
         set { stateLock.withLock { _stopped = newValue } }
@@ -205,6 +210,68 @@ public final class SystemAudioRecorder {
         ioProcID = procID
         status = AudioDeviceStart(aggregateID, procID)
         guard status == noErr else { throw SystemAudioError.ioProcFailed(status) }
+
+        // The rate read in 3b is a snapshot, so watch it for changes.
+        installSampleRateListener(on: aggregateID)
+    }
+
+    /// A Bluetooth headset flips between A2DP (48 kHz) and SCO (16 kHz) on the
+    /// *same* device the moment a call app opens its mic — no default-device
+    /// change, so the listener above never fires. The aggregate's rate follows
+    /// the flip while our capture format stays at the rate read during the
+    /// build, and the system track then records at the wrong speed (the 3x
+    /// bug 3b describes, from the other direction).
+    ///
+    /// The aggregate is the right object to watch rather than the output
+    /// device, because its nominal rate is exactly the value fed into
+    /// `ioASBD.mSampleRate`: if that has not changed, our format is still
+    /// correct.
+    private func installSampleRateListener(on deviceID: AudioObjectID) {
+        guard deviceID != kAudioObjectUnknown, rateListenerBlock == nil else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            // Deferred rather than rebuilt inline: the rebuild's teardown
+            // removes this very listener block, and a block must not remove
+            // itself while it is executing. The `stopped` guard is rechecked
+            // inside, since stop() can run between this notification and the
+            // deferred work.
+            DispatchQueue.main.async {
+                guard !self.stopped else { return }
+                self.rebuildAfterFormatChange()
+            }
+        }
+        rateListenerBlock = block
+        rateListenerDeviceID = deviceID
+        AudioObjectAddPropertyListenerBlock(deviceID, &address, .main, block)
+    }
+
+    private func removeSampleRateListener() {
+        guard let block = rateListenerBlock,
+              rateListenerDeviceID != kAudioObjectUnknown else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(rateListenerDeviceID, &address, .main, block)
+        rateListenerBlock = nil
+        rateListenerDeviceID = AudioObjectID(kAudioObjectUnknown)
+    }
+
+    /// Teardown + rebuild keeping the same WAV file open. Shared by the
+    /// default-output-device path and the sample-rate path, which need
+    /// identical handling: both invalidate the capture format.
+    private func rebuildAfterFormatChange() {
+        teardownCaptureChain()
+        do {
+            try buildCaptureChain()
+            setHealthy(true)
+        } catch {
+            setHealthy(false)
+        }
     }
 
     /// The default output device changed (e.g. headphones plugged in):
@@ -218,13 +285,7 @@ public final class SystemAudioRecorder {
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self, !self.stopped else { return }
-            self.teardownCaptureChain()
-            do {
-                try self.buildCaptureChain()
-                self.setHealthy(true)
-            } catch {
-                self.setHealthy(false)
-            }
+            self.rebuildAfterFormatChange()
         }
         defaultDeviceListenerBlock = block
         AudioObjectAddPropertyListenerBlock(
@@ -244,6 +305,10 @@ public final class SystemAudioRecorder {
     }
 
     private func teardownCaptureChain() {
+        // Symmetric with installSampleRateListener at the end of every
+        // successful build, and removed before the device it watches is
+        // destroyed below.
+        removeSampleRateListener()
         if let ioProcID, aggregateID != kAudioObjectUnknown {
             AudioDeviceStop(aggregateID, ioProcID)
             AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
