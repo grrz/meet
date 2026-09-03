@@ -134,13 +134,7 @@ public final class SystemAudioRecorder {
         guard status == noErr, let format = AVAudioFormat(streamDescription: &asbd) else {
             throw SystemAudioError.formatUnavailable(status)
         }
-        tapFormat = format
-
-        if let writer {
-            writer.updateSourceFormat(format)
-        } else {
-            writer = try WavWriter(url: outputURL, sourceFormat: format)
-        }
+        _ = format // sample layout validated; the effective rate is fixed up below
 
         // 3. Private aggregate device: default output as subdevice + our tap.
         let outputUID = try Self.defaultOutputDeviceUID()
@@ -164,6 +158,35 @@ public final class SystemAudioRecorder {
             aggregateDescription as CFDictionary, &newAggregateID)
         guard status == noErr else { throw SystemAudioError.aggregateCreationFailed(status) }
         aggregateID = newAggregateID
+
+        // 3b. The IOProc is clocked by the aggregate device, whose rate is the
+        // output device's actual rate — NOT necessarily the rate the tap's
+        // format property claims. Example: a Bluetooth headset in handsfree
+        // mode runs at 16 kHz while the tap still reports 48 kHz; trusting
+        // the tap's rate then writes 8 seconds of audio into 2.7 seconds of
+        // file (3x speed). Use the tap's sample layout with the aggregate's
+        // real rate as the effective IO format.
+        var aggregateRate: Float64 = 0
+        var rateSize = UInt32(MemoryLayout<Float64>.size)
+        var rateAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        status = AudioObjectGetPropertyData(aggregateID, &rateAddress, 0, nil, &rateSize, &aggregateRate)
+        var ioASBD = asbd
+        if status == noErr, aggregateRate > 0 {
+            ioASBD.mSampleRate = aggregateRate
+        }
+        guard let ioFormat = AVAudioFormat(streamDescription: &ioASBD) else {
+            throw SystemAudioError.formatUnavailable(status)
+        }
+        tapFormat = ioFormat
+
+        if let writer {
+            writer.updateSourceFormat(ioFormat)
+        } else {
+            writer = try WavWriter(url: outputURL, sourceFormat: ioFormat)
+        }
 
         // 4. IO proc: tap audio arrives as the aggregate's input buffers.
         var procID: AudioDeviceIOProcID?
