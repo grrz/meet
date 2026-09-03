@@ -75,15 +75,37 @@ final class PipelineTests: XCTestCase {
         let systemSegs = try SegmentParser.parse(Data(contentsOf: session.systemJSON))
         XCTAssertEqual(systemSegs, [])
         XCTAssertEqual(try session.loadMeta().stage, .completed)
+
+        let log = try String(contentsOf: session.logFile, encoding: .utf8)
+        XCTAssertTrue(log.contains("missing; writing empty segments"))
     }
 
     func testFailedEngineKeepsWavAndStage() throws {
         let session = try makeRecordedSession()
+
+        // Engine that emits identifiable output before failing, so we can
+        // assert the failure is actually captured in session.logFile.
+        let explodingEngine = root.appendingPathComponent("exploding-engine.sh")
+        try """
+        #!/bin/sh
+        echo "engine exploded" >&2
+        exit 3
+        """.write(to: explodingEngine, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                              ofItemAtPath: explodingEngine.path)
+
         var broken = config!
-        broken.sttCommand = "false {audio} {outdir}"
+        broken.sttCommand = "\(shellQuote(explodingEngine.path)) {audio} {outdir}"
         XCTAssertThrowsError(try Pipeline(config: broken).process(session: session))
         XCTAssertEqual(try session.loadMeta().stage, .recorded)
         XCTAssertTrue(FileManager.default.fileExists(atPath: session.micWAV.path))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: session.logFile.path))
+        let log = try String(contentsOf: session.logFile, encoding: .utf8)
+        XCTAssertTrue(log.contains("$ \(shellQuote(explodingEngine.path))"),
+                      "log should contain the rendered command line")
+        XCTAssertTrue(log.contains("engine exploded"),
+                      "log should contain the engine's captured output")
     }
 
     func testResumeFromTranscribed() throws {
