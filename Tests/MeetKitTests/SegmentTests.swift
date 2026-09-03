@@ -40,4 +40,31 @@ final class SegmentTests: XCTestCase {
         let bad = "{\"foo\": 1}".data(using: .utf8)!
         XCTAssertThrowsError(try SegmentParser.parse(bad))
     }
+
+    func testParsesEmptyArray() throws {
+        let json = "[]".data(using: .utf8)!
+        let segs = try SegmentParser.parse(json)
+        XCTAssertEqual(segs, [])
+    }
+
+    func testRejectsWrongFieldTypes() {
+        let badType = """
+        [{"text": "hello", "start": "0.1", "end": 1.0}]
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try SegmentParser.parse(badType))
+    }
+
+    func testRejectsMissingRequiredField() {
+        let missing = """
+        [{"text": "hello", "start": 0.1}]
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try SegmentParser.parse(missing))
+    }
+
+    func testRejectsObjectInsteadOfArray() {
+        let obj = """
+        {"segments": {"a": 1}}
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try SegmentParser.parse(obj))
+    }
 }

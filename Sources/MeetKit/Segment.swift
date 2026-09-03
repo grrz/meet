@@ -27,7 +27,13 @@ public enum SegmentParser {
         if raw is [Any] {
             array = raw
         } else if let dict = raw as? [String: Any] {
-            array = dict["segments"] ?? dict["sentences"]
+            let extracted = dict["segments"] ?? dict["sentences"]
+            // Ensure extracted value is an array, not an object
+            if let extracted, !(extracted is [Any]) {
+                array = nil
+            } else {
+                array = extracted
+            }
         } else {
             array = nil
         }
