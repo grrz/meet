@@ -67,4 +67,12 @@ final class SegmentTests: XCTestCase {
         """.data(using: .utf8)!
         XCTAssertThrowsError(try SegmentParser.parse(obj))
     }
+
+    func testTrimsLeadingAndTrailingWhitespaceFromText() throws {
+        let json = """
+        [{"text": "  Final capture...  ", "start": 0.0, "end": 1.0}]
+        """.data(using: .utf8)!
+        let segs = try SegmentParser.parse(json)
+        XCTAssertEqual(segs, [Segment(text: "Final capture...", start: 0.0, end: 1.0)])
+    }
 }

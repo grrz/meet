@@ -57,7 +57,7 @@ public enum Transcript {
                 lines.append("**[\(timecode(u.start))] \(u.speaker):** \(u.text)")
             }
         }
-        return lines.joined(separator: "\n")
+        return lines.joined(separator: "\n") + "\n"
     }
 
     public static func timecode(_ seconds: Double) -> String {

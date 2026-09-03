@@ -48,7 +48,7 @@ public enum SegmentParser {
         }
         let loose = try decoder.decode([Loose].self, from: arrayData)
         return loose
-            .map { Segment(text: $0.text, start: $0.start, end: $0.end) }
+            .map { Segment(text: $0.text.trimmingCharacters(in: .whitespacesAndNewlines), start: $0.start, end: $0.end) }
             .sorted { $0.start < $1.start }
     }
 }
