@@ -126,4 +126,82 @@ final class PipelineTests: XCTestCase {
         let transcript = try String(contentsOf: session.transcriptMD, encoding: .utf8)
         XCTAssertTrue(transcript.contains("mic speech"))
     }
+
+    /// A --force rerun must persist its stage reset before doing any work, so
+    /// a failure leaves the session at `recorded` — retryable with a plain
+    /// `meet process` — rather than at `completed` with mixed artifacts.
+    func testFailedForceRerunLeavesStageRetryable() throws {
+        let session = try makeRecordedSession()
+        let pipeline = Pipeline(config: config)
+        try pipeline.process(session: session)
+        XCTAssertEqual(try session.loadMeta().stage, .completed)
+
+        var broken = config!
+        broken.sttCommand = "false {audio} {outdir}"
+        XCTAssertThrowsError(try Pipeline(config: broken).process(session: session, force: true))
+
+        // Without the pre-work saveMeta this reads `completed`, and a plain
+        // rerun would skip the session instead of picking it back up.
+        XCTAssertEqual(try session.loadMeta().stage, .recorded)
+
+        try pipeline.process(session: session)                       // plain retry catches up
+        XCTAssertEqual(try session.loadMeta().stage, .completed)
+    }
+
+    /// A recording killed before its WAV header was finalized reports zero
+    /// frames over real audio. The pipeline must repair the header rather than
+    /// transcribe silence and then compress the track into an empty m4a.
+    func testRepairsStaleWavHeaderBeforeTranscribing() throws {
+        let store = SessionStore(rootDir: root)
+        let session = try store.createSession(at: Date())
+
+        for url in [session.micWAV, session.systemWAV] {
+            try writeStaleHeaderWav(at: url, frames: 24_000)         // 0.5 s each
+            // Precondition: the track currently reads as empty.
+            XCTAssertEqual(try AVAudioFile(forReading: url).length, 0)
+        }
+        var meta = SessionMeta(startedAt: Date())
+        meta.stage = .recorded
+        meta.endedAt = Date()
+        try session.saveMeta(meta)
+
+        try Pipeline(config: config).process(session: session)
+
+        XCTAssertEqual(try session.loadMeta().stage, .completed)
+        let transcript = try String(contentsOf: session.transcriptMD, encoding: .utf8)
+        XCTAssertTrue(transcript.contains("mic speech"))
+        XCTAssertTrue(transcript.contains("system speech"))
+
+        let log = try String(contentsOf: session.logFile, encoding: .utf8)
+        XCTAssertTrue(log.contains("repaired stale WAV header: mic.wav"), log)
+        XCTAssertTrue(log.contains("repaired stale WAV header: system.wav"), log)
+
+        // The rescued audio really was compressible: with a zero-frame header
+        // the compressor would have refused and the run would have failed.
+        let fm = FileManager.default
+        XCTAssertTrue(fm.fileExists(atPath: session.micM4A.path))
+        XCTAssertTrue(fm.fileExists(atPath: session.systemM4A.path))
+    }
+
+    /// Canonical 44-byte header with both size fields zeroed, followed by real
+    /// PCM payload — the shape a hard kill leaves behind.
+    private func writeStaleHeaderWav(at url: URL, frames: Int) throws {
+        var out = Data()
+        func tag(_ text: String) { out.append(contentsOf: Array(text.utf8)) }
+        func u32(_ value: UInt32) {
+            withUnsafeBytes(of: value.littleEndian) { out.append(contentsOf: $0) }
+        }
+        func u16(_ value: UInt16) {
+            withUnsafeBytes(of: value.littleEndian) { out.append(contentsOf: $0) }
+        }
+        tag("RIFF"); u32(36); tag("WAVE")            // stale: header-only size
+        tag("fmt "); u32(16)
+        u16(1); u16(1); u32(48000); u32(96000); u16(2); u16(16)
+        tag("data"); u32(0)                          // stale: claims no audio
+        for i in 0..<frames {
+            let sample = Int16(sin(Double(i) * 0.05) * 8000)
+            withUnsafeBytes(of: sample.littleEndian) { out.append(contentsOf: $0) }
+        }
+        try out.write(to: url)
+    }
 }

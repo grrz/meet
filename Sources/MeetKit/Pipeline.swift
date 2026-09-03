@@ -8,12 +8,20 @@ public struct Pipeline: Sendable {
     public func process(session: Session, force: Bool = false,
                         progress: (@Sendable (String) -> Void)? = nil) throws {
         var meta = try session.loadMeta()
-        if force, meta.stage > .recorded { meta.stage = .recorded }
+        if force, meta.stage > .recorded {
+            // Persist the reset *before* any work starts. Otherwise a --force
+            // rerun that fails partway leaves meta at `completed` alongside
+            // half-replaced artifacts, and a plain `meet process` then skips
+            // the session entirely instead of retrying it.
+            meta.stage = .recorded
+            try session.saveMeta(meta)
+        }
         // A crash during recording leaves stage == .recording; the WAVs on disk
         // are all we have — treat it as recorded.
         if meta.stage == .recording { meta.stage = .recorded }
 
         if meta.stage == .recorded {
+            repairStaleTrackHeaders(session: session)
             progress?("transcribing mic")
             try transcribeTrack(session: session, wav: session.micWAV,
                                 m4a: session.micM4A, json: session.micJSON)
@@ -51,6 +59,29 @@ public struct Pipeline: Sendable {
             }
             meta.stage = .completed
             try session.saveMeta(meta)
+        }
+    }
+
+    /// Recordings made before `WavWriter` started keeping the header
+    /// consistent can carry a stale `data` chunk size — killed mid-recording,
+    /// their header claims zero frames over real audio. Such a track would be
+    /// transcribed as silence and then, worse, "compressed" into an empty m4a
+    /// with the WAV deleted. Patch the sizes from the real file length first.
+    ///
+    /// Deliberately non-throwing: a header we cannot interpret is not a reason
+    /// to abandon the run, so it is logged and the track is left exactly as it
+    /// was for the stages downstream to judge.
+    private func repairStaleTrackHeaders(session: Session) {
+        for wav in [session.micWAV, session.systemWAV]
+        where FileManager.default.fileExists(atPath: wav.path) {
+            do {
+                if case .repaired = try WavHeaderRepair.repairIfStale(at: wav) {
+                    log(session: session, "repaired stale WAV header: \(wav.lastPathComponent)")
+                }
+            } catch {
+                log(session: session, "could not inspect WAV header for "
+                    + "\(wav.lastPathComponent): \(error.localizedDescription)")
+            }
         }
     }
 
