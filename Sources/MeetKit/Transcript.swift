@@ -1,6 +1,6 @@
 import Foundation
 
-public struct TranscriptOptions: Sendable {
+public struct TranscriptOptions: Equatable, Sendable {
     public var mergeGapSeconds: Double
     public var speakerMe: String
     public var speakerThem: String
