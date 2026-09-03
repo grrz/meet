@@ -6,18 +6,37 @@ public final class MicRecorder {
     private let engine = AVAudioEngine()
     private let outputURL: URL
     private var writer: WavWriter?
-    private let pausedLock = NSLock()
-    private var _paused = false
     private var observer: NSObjectProtocol?
 
-    public private(set) var isHealthy = true
+    /// Guards every field the audio-render thread and the main thread both
+    /// touch: `_paused`, `_isHealthy`, `_stopped`, and access to `writer`
+    /// itself (write in the tap callback vs. finalize in `stop()`). Each
+    /// property below acquires it only for the single access it needs and
+    /// never while calling back into `engine`/`onHealthChange`/another
+    /// locked accessor, so there is no nesting and no lock held across a
+    /// call that could re-enter.
+    private let stateLock = NSLock()
+    private var _paused = false
+    private var _isHealthy = true
+    private var _stopped = false
+
     /// Called on the main queue when health changes (for the status line).
     public var onHealthChange: ((Bool) -> Void)?
 
     /// Atomic; drops buffers while true.
     public var paused: Bool {
-        get { pausedLock.withLock { _paused } }
-        set { pausedLock.withLock { _paused = newValue } }
+        get { stateLock.withLock { _paused } }
+        set { stateLock.withLock { _paused = newValue } }
+    }
+
+    public var isHealthy: Bool { stateLock.withLock { _isHealthy } }
+
+    /// Set once by `stop()`; checked by the device-change recovery path so
+    /// a recovery notification that was already queued before `stop()` ran
+    /// can't re-light the engine after the caller considers capture over.
+    private var stopped: Bool {
+        get { stateLock.withLock { _stopped } }
+        set { stateLock.withLock { _stopped = newValue } }
     }
 
     public var durationSeconds: Double { writer?.durationSeconds ?? 0 }
@@ -32,7 +51,17 @@ public final class MicRecorder {
         let writer = try WavWriter(url: outputURL, sourceFormat: format)
         self.writer = writer
         installTap(format: format)
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            // Nothing ever recorded on this attempt: don't leave a
+            // header-only WAV behind for the pipeline to trip over.
+            engine.inputNode.removeTap(onBus: 0)
+            writer.finalize()
+            self.writer = nil
+            try? FileManager.default.removeItem(at: outputURL)
+            throw error
+        }
 
         // The engine stops itself when the default input device changes or dies.
         observer = NotificationCenter.default.addObserver(
@@ -48,14 +77,25 @@ public final class MicRecorder {
             [weak self] buffer, _ in
             guard let self, !self.paused else { return }
             do {
-                try self.writer?.write(buffer)
+                try self.writeLocked(buffer)
             } catch {
                 self.setHealthy(false)
             }
         }
     }
 
+    /// Locked so a straggler tap callback (AVAudioEngine buffers arrive on
+    /// an internal queue; `removeTap`/`stop()` don't document draining)
+    /// can never run concurrently with `finalize()` closing the same
+    /// `AVAudioFile` in `stop()`.
+    private func writeLocked(_ buffer: AVAudioPCMBuffer) throws {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        try writer?.write(buffer)
+    }
+
     private func recoverFromConfigurationChange() {
+        guard !stopped else { return }
         engine.inputNode.removeTap(onBus: 0)
         let newFormat = engine.inputNode.outputFormat(forBus: 0)
         guard newFormat.sampleRate > 0 else {
@@ -73,16 +113,23 @@ public final class MicRecorder {
     }
 
     private func setHealthy(_ value: Bool) {
-        guard isHealthy != value else { return }
-        isHealthy = value
+        let changed: Bool = stateLock.withLock {
+            guard _isHealthy != value else { return false }
+            _isHealthy = value
+            return true
+        }
+        guard changed else { return }
         DispatchQueue.main.async { self.onHealthChange?(value) }
     }
 
     public func stop() {
+        stopped = true
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = nil
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        stateLock.lock()
         writer?.finalize()
+        stateLock.unlock()
     }
 }

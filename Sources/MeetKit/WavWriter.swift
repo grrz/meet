@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 /// Errors thrown by `WavWriter`.
-public enum WavWriterError: Error, CustomStringConvertible {
+public enum WavWriterError: Error, CustomStringConvertible, LocalizedError {
     /// `AVAudioConverter(from:to:)` returned nil for the given formats
     /// (e.g. an unsupported channel layout or sample rate combination).
     case converterCreationFailed(source: AVAudioFormat, target: AVAudioFormat)
@@ -19,6 +19,8 @@ public enum WavWriterError: Error, CustomStringConvertible {
             return "WavWriter: no audio converter is available (a previous updateSourceFormat call failed)"
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// Streams AVAudioPCMBuffers of any source format into a 48 kHz mono 16-bit WAV.

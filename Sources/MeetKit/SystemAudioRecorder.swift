@@ -6,6 +6,7 @@ import Foundation
 /// Errors thrown by `SystemAudioRecorder`.
 public enum SystemAudioError: Error, LocalizedError {
     case tapCreationFailed(OSStatus)
+    case formatUnavailable(OSStatus)
     case aggregateCreationFailed(OSStatus)
     case ioProcFailed(OSStatus)
 
@@ -17,6 +18,8 @@ public enum SystemAudioError: Error, LocalizedError {
             Grant permission in System Settings → Privacy & Security → \
             Screen & System Audio Recording (allow your terminal app), then retry.
             """
+        case .formatUnavailable(let s):
+            "Could not read the system audio tap's stream format (OSStatus \(s))"
         case .aggregateCreationFailed(let s): "Aggregate device creation failed (OSStatus \(s))"
         case .ioProcFailed(let s): "Audio IO proc failed (OSStatus \(s))"
         }
@@ -35,14 +38,35 @@ public final class SystemAudioRecorder {
     private var defaultDeviceListenerInstalled = false
     private var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
 
-    private let pausedLock = NSLock()
+    /// Guards `_paused`, `_isHealthy`, and `_stopped` — touched from both
+    /// the HAL IO thread (via the IOProc block) and the main queue (via the
+    /// default-device listener block and public callers). The IOProc's own
+    /// write/finalize race is already closed by a hard barrier
+    /// (`AudioDeviceStop`/`AudioDeviceDestroyIOProcID` in
+    /// `teardownCaptureChain()` run, and are documented to block until no
+    /// further IOProc callback fires, before `stop()` ever reaches
+    /// `writer?.finalize()`), so this lock does not need to cover `writer`.
+    private let stateLock = NSLock()
     private var _paused = false
+    private var _isHealthy = true
+    private var _stopped = false
+
     public var paused: Bool {
-        get { pausedLock.withLock { _paused } }
-        set { pausedLock.withLock { _paused = newValue } }
+        get { stateLock.withLock { _paused } }
+        set { stateLock.withLock { _paused = newValue } }
     }
 
-    public private(set) var isHealthy = true
+    public var isHealthy: Bool { stateLock.withLock { _isHealthy } }
+
+    /// Set once by `stop()`; checked by the default-device listener block
+    /// so a device-change notification already queued on the main queue
+    /// before `stop()` ran can't rebuild a brand-new tap + aggregate device
+    /// after the caller considers capture over.
+    private var stopped: Bool {
+        get { stateLock.withLock { _stopped } }
+        set { stateLock.withLock { _stopped = newValue } }
+    }
+
     public var onHealthChange: ((Bool) -> Void)?
     public var durationSeconds: Double { writer?.durationSeconds ?? 0 }
 
@@ -57,11 +81,25 @@ public final class SystemAudioRecorder {
     /// whatever partial state it created before rethrowing. Without this,
     /// a failure after the tap is created (e.g. aggregate-device creation
     /// fails) would leak `tapID` since nothing else ever destroys it.
+    ///
+    /// If this attempt is the one that created `writer` (i.e. this is the
+    /// initial `start()`, not a later device-change rebuild of an
+    /// already-recording session), a failure also finalizes and deletes the
+    /// half-written WAV rather than leaving a header-only file behind for
+    /// the pipeline to trip over. A rebuild that fails after real audio was
+    /// already captured must never delete that file, so this only fires
+    /// when `writer` was nil going into the attempt.
     private func buildCaptureChain() throws {
+        let writerExistedBeforeAttempt = writer != nil
         do {
             try buildCaptureChainOrThrow()
         } catch {
             teardownCaptureChain()
+            if !writerExistedBeforeAttempt, let writer {
+                writer.finalize()
+                self.writer = nil
+                try? FileManager.default.removeItem(at: outputURL)
+            }
             throw error
         }
     }
@@ -87,7 +125,7 @@ public final class SystemAudioRecorder {
             mElement: kAudioObjectPropertyElementMain)
         status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &asbd)
         guard status == noErr, let format = AVAudioFormat(streamDescription: &asbd) else {
-            throw SystemAudioError.tapCreationFailed(status)
+            throw SystemAudioError.formatUnavailable(status)
         }
         tapFormat = format
 
@@ -149,7 +187,7 @@ public final class SystemAudioRecorder {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
+            guard let self, !self.stopped else { return }
             self.teardownCaptureChain()
             do {
                 try self.buildCaptureChain()
@@ -192,12 +230,17 @@ public final class SystemAudioRecorder {
     }
 
     private func setHealthy(_ value: Bool) {
-        guard isHealthy != value else { return }
-        isHealthy = value
+        let changed: Bool = stateLock.withLock {
+            guard _isHealthy != value else { return false }
+            _isHealthy = value
+            return true
+        }
+        guard changed else { return }
         DispatchQueue.main.async { self.onHealthChange?(value) }
     }
 
     public func stop() {
+        stopped = true
         removeDefaultDeviceListener()
         teardownCaptureChain()
         writer?.finalize()
