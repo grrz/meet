@@ -16,7 +16,9 @@ public final class RecordingSession {
     public var micHealthy: Bool { mic.isHealthy }
     public var systemHealthy: Bool { system.isHealthy }
     public var isPaused: Bool { currentPause != nil }
-    public var elapsedSeconds: Double { max(mic.durationSeconds, system.durationSeconds) }
+    public var micDurationSeconds: Double { mic.durationSeconds }
+    public var systemDurationSeconds: Double { system.durationSeconds }
+    public var elapsedSeconds: Double { max(micDurationSeconds, systemDurationSeconds) }
 
     /// Creates the session folder, writes the initial `meta.json` (stage
     /// `.recording`), and starts both recorders.
@@ -35,6 +37,11 @@ public final class RecordingSession {
 
         mic = MicRecorder(outputURL: session.micWAV)
         system = SystemAudioRecorder(outputURL: session.systemWAV)
+        // Capture `session` (a value type) rather than `self`, which isn't
+        // fully initialized yet at this point in init().
+        let loggedSession = session
+        mic.onEvent = { message in RecordingSession.appendLog(message, to: loggedSession) }
+        system.onEvent = { message in RecordingSession.appendLog(message, to: loggedSession) }
         try system.start()  // fail fast on missing TCC before touching the mic
         meta.systemStartedAt = Date()
         do {
@@ -78,9 +85,30 @@ public final class RecordingSession {
         mic.stop()
         system.stop()
         meta.endedAt = Date()
+        meta.micDurationSeconds = micDurationSeconds
+        meta.systemDurationSeconds = systemDurationSeconds
         meta.audioDurationSeconds = elapsedSeconds
         meta.stage = .recorded
         try session.saveMeta(meta)
         return session
+    }
+
+    /// Appends a timestamped line to the session's pipeline log — same
+    /// format as `Pipeline`'s log helper. Used to record recorder lifecycle
+    /// events (device-change rebuilds, rebuild failures) that don't fit the
+    /// health flag but matter when reading back what happened to a session.
+    /// Static, and takes `session` explicitly, so it can be used from the
+    /// recorder `onEvent` closures set up during `init()`, before `self` is
+    /// fully initialized.
+    private static func appendLog(_ message: String, to session: Session) {
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
+        if let handle = try? FileHandle(forWritingTo: session.logFile) {
+            _ = try? handle.seekToEnd()
+            handle.write(line.data(using: .utf8)!)
+            _ = try? handle.close()
+        } else {
+            FileManager.default.createFile(atPath: session.logFile.path,
+                                           contents: line.data(using: .utf8))
+        }
     }
 }
