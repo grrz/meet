@@ -42,6 +42,14 @@ public struct SessionMeta: Codable, Equatable, Sendable {
     /// which has no fractional part — same as `startedAt`/`endedAt`.
     public var micStartedAt: Date?
     public var systemStartedAt: Date?
+    /// Per-track writer durations at stop(), independent of
+    /// `audioDurationSeconds` (which is `max` of the two). A track whose
+    /// duration is far short of the other's is the on-disk trace of a
+    /// silent recovery failure (see `StallDetector`) — optional, and
+    /// decoded with `decodeIfPresent`, so `meta.json` files written before
+    /// these fields existed still load.
+    public var micDurationSeconds: Double?
+    public var systemDurationSeconds: Double?
 
     public init(startedAt: Date, stage: Stage = .recording) {
         self.startedAt = startedAt
