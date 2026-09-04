@@ -7,6 +7,18 @@ engine. Runs entirely on your Mac: no audio or transcript leaves the
 machine unless you point the STT command at something that sends it
 somewhere.
 
+## Disclaimer
+
+`meet` does not announce itself in calls: unlike bot-based recorders, it
+gives other participants no indication that recording is taking place.
+You are solely responsible for how you use it. In many jurisdictions,
+recording a conversation without the consent of all (or at least one)
+participant is illegal — know the rules that apply to you, obtain consent
+where required, and store and process recordings and transcripts
+responsibly. The software is provided "as is", without warranty of any
+kind; the author accepts no liability for your use of it (see
+[LICENSE](LICENSE)).
+
 ## Getting started (prebuilt binary)
 
 Grab the `meet` binary from the [latest
@@ -242,3 +254,7 @@ missing; `--force` walks a session through every stage again from
 `recorded`, even if it already reached `completed`. A session completed
 with `save_audio = false` has no audio left to re-transcribe, so `--force`
 on it fails with an error instead of silently overwriting the transcript.
+
+## License
+
+[MIT](LICENSE)
