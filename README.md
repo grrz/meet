@@ -28,9 +28,20 @@ somewhere.
 ## Install
 
 ```
-swift build -c release
-cp .build/release/meet /usr/local/bin/   # or anywhere else on your PATH
+make install                 # builds a release binary, installs it as `meet`
 ```
+
+This installs into `$HOME/.local/bin` by default; make sure that's on your
+`PATH`, or override the location:
+
+```
+make install PREFIX=/usr/local/bin
+```
+
+Building from source needs the Swift toolchain (see Requirements above);
+once `meet` is built and installed, running it only needs the `meet`
+binary itself and `parakeet-mlx` (or your chosen STT engine) on `PATH` —
+no toolchain required at runtime.
 
 ## Usage
 
@@ -108,7 +119,35 @@ merge_gap_seconds = 2.0
 # Speaker labels used in transcript.md.
 speaker_me = "Me"
 speaker_them = "Them"
+
+# When true, keeps every intermediate file (mic.json, system.json,
+# pipeline.log) instead of deleting them once transcript.md is written.
+# Useful when debugging the STT engine or a transcript that looks off.
+# Overrides save_audio below — audio is always compressed and kept.
+debug = false
+# When true (the default), the raw mic.wav/system.wav recordings are
+# compressed to mic.m4a/system.m4a and kept after the transcript is
+# assembled. Set to false to discard the audio entirely instead — the WAVs
+# are deleted directly and no m4a is ever created.
+save_audio = true
 ```
+
+### Session folder cleanup
+
+Once a session reaches the `completed` stage, what's left in its folder
+depends on `debug` and `save_audio` — `meta.json` is always kept:
+
+| `debug` | `save_audio` | Folder ends up with |
+|---------|--------------|----------------------|
+| `true`  | (ignored)    | transcript.md, mic.m4a, system.m4a, mic.json, system.json, pipeline.log, meta.json |
+| `false` | `true` (default) | transcript.md, mic.m4a, system.m4a, meta.json |
+| `false` | `false`      | transcript.md, meta.json |
+
+`save_audio = false` deletes the WAVs outright — no m4a is ever produced —
+so a session recorded that way has no audio left afterward: `meet process
+--force` on it fails fast with a clear error instead of overwriting a good
+transcript with an empty one. Use `debug = true` while it's set instead if
+you still want the audio.
 
 ### STT contract
 
@@ -155,16 +194,19 @@ start time:
 ~/MeetingRecordings/2026-09-03-1420/
 ├── mic.m4a          # your track, compressed after transcription
 ├── system.m4a       # their track
-├── mic.json         # raw STT segments for the mic track
-├── system.json      # raw STT segments for the system track
 ├── transcript.md    # the assembled, human-readable transcript
-├── meta.json         # start/end times, pause intervals, pipeline stage, engine used
-└── pipeline.log      # STT engine's captured output, for debugging failures
+└── meta.json        # start/end times, pause intervals, pipeline stage, engine used
 ```
 
-`mic.wav` / `system.wav` exist during and right after recording and are
-replaced by the `.m4a` files once transcription succeeds — raw audio is
-never deleted before its transcript is safely on disk.
+This is the default (`debug = false`, `save_audio = true`) layout once a
+session reaches `completed`. `mic.wav` / `system.wav` exist during and
+right after recording and are replaced by the `.m4a` files once
+transcription succeeds — raw audio is never deleted before its transcript
+is safely on disk. `mic.json`/`system.json` (raw STT segments) and
+`pipeline.log` (the STT engine's captured output) exist as intermediates
+throughout the pipeline and are cleaned up at the end unless `debug =
+true`; see [Session folder cleanup](#session-folder-cleanup) for every
+`debug`/`save_audio` combination.
 
 ### Pipeline stages
 
@@ -175,8 +217,11 @@ so a crash or engine failure always leaves a clear resume point:
 2. **transcribed** — `mic.json` and `system.json` exist (empty `[]` for
    any track that never recorded any audio).
 3. **merged** — `transcript.md` has been assembled from the two JSONs.
-4. **completed** — WAVs have been compressed to `.m4a` and removed.
+4. **completed** — audio and intermediates are cleaned up per `debug` and
+   `save_audio` (see [Session folder cleanup](#session-folder-cleanup)).
 
 `meet process` reads this stage and only does the work that's still
 missing; `--force` walks a session through every stage again from
-`recorded`, even if it already reached `completed`.
+`recorded`, even if it already reached `completed`. A session completed
+with `save_audio = false` has no audio left to re-transcribe, so `--force`
+on it fails with an error instead of silently overwriting the transcript.
