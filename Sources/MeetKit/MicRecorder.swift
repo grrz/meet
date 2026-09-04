@@ -193,8 +193,10 @@ public final class MicRecorder {
         } catch {
             // Nothing ever recorded on this attempt: don't leave a
             // header-only WAV behind for the pipeline to trip over.
-            newEngine.inputNode.removeTap(onBus: 0)
-            engine = nil
+            autoreleasepool {
+                newEngine.inputNode.removeTap(onBus: 0)
+                engine = nil
+            }
             stateLock.withLock {
                 writer.finalize()
                 self.writer = nil
@@ -374,13 +376,17 @@ public final class MicRecorder {
     /// while it is executing. Gating on `rebuildScheduled` means a
     /// configuration-change notification and a default-device notification for
     /// the *same* switch coalesce into a single `rebuildEngine` call instead of
-    /// two back-to-back ones. `stopped` is re-checked inside the deferred
-    /// block, since `stop()` can run in between.
+    /// two back-to-back ones. The 0.25s delay before the deferred block runs
+    /// is what actually does the coalescing: a live test showed a Bluetooth
+    /// SCO transition fire three separate signals within about a second, and
+    /// without the delay each one raced in as its own rebuild before
+    /// `rebuildScheduled` could gate the next. `stopped` is re-checked inside
+    /// the deferred block, since `stop()` can run in between.
     /// Control queue only.
     private func requestRebuild(reason: String) {
         guard !stopped, !rebuildScheduled else { return }
         rebuildScheduled = true
-        AudioControl.async { [weak self] in
+        AudioControl.queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self else { return }
             self.rebuildScheduled = false
             guard !self.stopped else { return }
@@ -435,8 +441,10 @@ public final class MicRecorder {
         } catch {
             // Release the engine that would not start, both to free a
             // Bluetooth headset and so the next signal starts from scratch.
-            newEngine.inputNode.removeTap(onBus: 0)
-            engine = nil
+            autoreleasepool {
+                newEngine.inputNode.removeTap(onBus: 0)
+                engine = nil
+            }
             setHealthy(false)
             emit("audio engine rebuild failed: \(error.localizedDescription)")
         }

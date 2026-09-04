@@ -327,13 +327,18 @@ public final class SystemAudioRecorder {
     ///
     /// Deferred rather than rebuilt inline because the rebuild's teardown
     /// removes the very listener blocks that call this, and a block must not
-    /// remove itself while it is executing. The `stopped` guard is rechecked
-    /// inside the deferred work, since `stop()` can run in between.
+    /// remove itself while it is executing. The 0.25s delay before the
+    /// deferred block runs is what actually does the coalescing: a live test
+    /// showed a Bluetooth SCO transition fire three separate signals within
+    /// about a second, and without the delay each one raced in as its own
+    /// rebuild before `rebuildScheduled` could gate the next. The `stopped`
+    /// guard is rechecked inside the deferred work, since `stop()` can run in
+    /// between.
     /// Control queue only.
     private func requestRebuild(reason: String) {
         guard !stopped, !rebuildScheduled else { return }
         rebuildScheduled = true
-        AudioControl.async { [weak self] in
+        AudioControl.queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self else { return }
             self.rebuildScheduled = false
             guard !self.stopped else { return }
