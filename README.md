@@ -1,0 +1,244 @@
+# meet
+
+Records meetings — your microphone and the other side's system audio, at
+the same time, without any audio rerouting or virtual devices — and
+transcribes the recording locally with a pluggable speech-to-text (STT)
+engine. Runs entirely on your Mac: no audio or transcript leaves the
+machine unless you point the STT command at something that sends it
+somewhere.
+
+## Getting started (prebuilt binary)
+
+Grab the `meet` binary from the [latest
+release](https://github.com/grrz/meet/releases/latest). To use it you need
+an Apple Silicon Mac on macOS 15 or later, plus:
+
+1. **Put the binary on your `PATH`.** If you downloaded it through a
+   browser, macOS quarantines it first — clear that and make it
+   executable:
+   ```
+   xattr -d com.apple.quarantine ./meet
+   chmod +x ./meet
+   mv ./meet ~/.local/bin/   # or anywhere on your PATH
+   ```
+   (`gh release download` and `curl` don't set the quarantine flag.)
+2. **Install the STT engine.** The default is
+   [`parakeet-mlx`](https://github.com/senstella/parakeet-mlx) (Apple
+   Silicon-only; the default model `parakeet-tdt-0.6b-v3` is multilingual
+   and auto-detects language per utterance):
+   ```
+   uv tool install parakeet-mlx
+   ```
+   or
+   ```
+   pipx install parakeet-mlx
+   ```
+3. **Grant permissions.** Microphone prompts on first run; **System Audio
+   Recording never prompts** and must be granted manually to your terminal
+   app in advance — see [Permissions](#permissions). Without it, recordings
+   of the other side are silent.
+4. **Config is optional** — `meet` works with built-in defaults; see
+   [Configuration](#configuration) to change paths, speaker labels, or the
+   STT engine.
+
+## Building from source
+
+Requires a Swift 6 toolchain (ships with recent Xcode / Xcode Command Line
+Tools):
+
+```
+make install                 # builds a release binary, installs it as `meet`
+```
+
+This installs into `$HOME/.local/bin` by default; make sure that's on your
+`PATH`, or override the location:
+
+```
+make install PREFIX=/usr/local/bin
+```
+
+The toolchain is only needed to build: at runtime `meet` needs just the
+binary itself and `parakeet-mlx` (or your chosen STT engine) on `PATH`.
+
+## Usage
+
+Run `meet` with no arguments to start interactive recording mode. It stays
+open in a terminal corner for the whole day; each keypress controls the
+current recording:
+
+| Key     | Action                                  |
+|---------|------------------------------------------|
+| `z`     | Start a recording, or stop the current one |
+| `space` | Pause / resume the current recording     |
+| `q`     | Quit (stops any active recording first)  |
+
+Stopping a recording queues it for transcription in the background, so you
+can start the next recording immediately; `meet` prints `✓ <session>:
+transcript ready` when a transcript finishes assembling. Pressing Ctrl+C
+once waits for any in-flight transcriptions to finish before exiting;
+pressing it a second time exits immediately (the recorded audio is safe
+either way — nothing is deleted, and `meet process` catches up later).
+
+To (re)run the transcription pipeline over recordings that didn't finish —
+after a crash, an STT engine failure, or a config change:
+
+```
+meet process <folder>       # one session folder
+meet process --all          # every session under recordings_dir
+meet process --all --force  # redo every stage, even already-completed ones
+```
+
+`--force` is what you want after switching STT engines or models and
+wanting old sessions re-transcribed with the new one.
+
+## Permissions
+
+`meet` needs two macOS permissions, and they behave very differently:
+
+- **Microphone** prompts normally the first time you run `meet` — accept
+  the system dialog.
+- **System Audio Recording** does **not** prompt. macOS creates the
+  Core Audio tap that captures the other side's audio silently; if the
+  permission isn't granted, the recording simply contains silence and no
+  error is raised anywhere. You have to grant it yourself, in advance:
+  open **System Settings → Privacy & Security → Screen & System Audio
+  Recording**, find the **System Audio Recording Only** section, click
+  **+**, and add the terminal app you run `meet` from (Terminal, iTerm,
+  Warp, etc.).
+
+Both permissions are tied to the terminal app's identity, not to `meet`
+itself — if you switch terminal apps, grant System Audio Recording again
+for the new one.
+
+Bluetooth headsets running in hands-free/handsfree mode drop their input
+to 16 kHz; `meet` resamples whatever the hardware provides, so recording
+and transcription quality are unaffected either way — parakeet operates at
+16 kHz internally regardless of the source sample rate.
+
+## Configuration
+
+`meet` reads `~/.config/meet/config.toml` if it exists; every key is
+optional and falls back to the default shown below.
+
+```toml
+# Where session folders are created.
+recordings_dir = "~/MeetingRecordings"
+
+[stt]
+# Template for the STT engine invocation. {audio} and {outdir} are
+# substituted with shell-quoted paths before the command runs.
+command = "parakeet-mlx {audio} --output-format json --output-dir {outdir}"
+
+[transcript]
+# Consecutive segments from the same speaker with a gap shorter than this
+# (in seconds) are merged into one utterance in transcript.md.
+merge_gap_seconds = 2.0
+# Speaker labels used in transcript.md.
+speaker_me = "Me"
+speaker_them = "Them"
+
+# When true, keeps every intermediate file (mic.json, system.json,
+# pipeline.log) instead of deleting them once transcript.md is written.
+# Useful when debugging the STT engine or a transcript that looks off.
+# Overrides save_audio below — audio is always compressed and kept.
+debug = false
+# When true (the default), the raw mic.wav/system.wav recordings are
+# compressed to mic.m4a/system.m4a and kept after the transcript is
+# assembled. Set to false to discard the audio entirely instead — the WAVs
+# are deleted directly and no m4a is ever created.
+save_audio = true
+```
+
+### Session folder cleanup
+
+Once a session reaches the `completed` stage, what's left in its folder
+depends on `debug` and `save_audio` — `meta.json` is always kept:
+
+| `debug` | `save_audio` | Folder ends up with |
+|---------|--------------|----------------------|
+| `true`  | (ignored)    | transcript.md, mic.m4a, system.m4a, mic.json, system.json, pipeline.log, meta.json |
+| `false` | `true` (default) | transcript.md, mic.m4a, system.m4a, meta.json |
+| `false` | `false`      | transcript.md, meta.json |
+
+`save_audio = false` deletes the WAVs outright — no m4a is ever produced —
+so a session recorded that way has no audio left afterward: `meet process
+--force` on it fails fast with a clear error instead of overwriting a good
+transcript with an empty one. Use `debug = true` while it's set instead if
+you still want the audio.
+
+### STT contract
+
+`meet` treats the STT engine as an external process. It runs your
+`stt.command` once per audio track (once for the mic, once for the system
+track), with `{audio}` replaced by the path to a mono WAV/M4A file and
+`{outdir}` replaced by a scratch output directory it creates and cleans up
+per invocation. The engine is expected to write `<audio stem>.json` into
+that output directory before exiting 0 — e.g. for `mic.wav` it must write
+`mic.json`.
+
+That JSON can take either of these shapes:
+
+- a top-level array of segments:
+  ```json
+  [{"text": "Hello", "start": 0.1, "end": 0.8}, ...]
+  ```
+- an object with a `segments` or `sentences` key holding that array (extra
+  keys are ignored — this is what `parakeet-mlx --output-format json`
+  produces):
+  ```json
+  {"text": "Hello world.", "sentences": [{"text": "Hello", "start": 0.1, "end": 0.8}, ...]}
+  ```
+
+Each segment object needs exactly `text` (string), `start` (seconds,
+number), and `end` (seconds, number); extra fields are ignored. If the
+engine exits non-zero, or exits 0 but never writes the expected JSON file,
+the pipeline stops with that track's stage left at `recorded` and the
+engine's full stdout/stderr captured in the session's `pipeline.log` — the
+recorded audio is never touched, and `meet process` retries later.
+
+**Plugging in a different engine:** point `stt.command` at any executable
+that honors the same `{audio}`/`{outdir}` placeholders and writes JSON in
+one of the shapes above. For an engine with a different CLI or output
+format, write a small adapter shell script that translates arguments and
+reshapes the output, and point `command` at the adapter instead.
+
+## Session storage
+
+Each recording gets its own folder under `recordings_dir`, named by
+start time:
+
+```
+~/MeetingRecordings/2026-09-03-1420/
+├── mic.m4a          # your track, compressed after transcription
+├── system.m4a       # their track
+├── transcript.md    # the assembled, human-readable transcript
+└── meta.json        # start/end times, pause intervals, pipeline stage, engine used
+```
+
+This is the default (`debug = false`, `save_audio = true`) layout once a
+session reaches `completed`. `mic.wav` / `system.wav` exist during and
+right after recording and are replaced by the `.m4a` files once
+transcription succeeds — raw audio is never deleted before its transcript
+is safely on disk. `mic.json`/`system.json` (raw STT segments) and
+`pipeline.log` (the STT engine's captured output) exist as intermediates
+throughout the pipeline and are cleaned up at the end unless `debug =
+true`; see [Session folder cleanup](#session-folder-cleanup) for every
+`debug`/`save_audio` combination.
+
+### Pipeline stages
+
+Each session moves through these stages in order, tracked in `meta.json`
+so a crash or engine failure always leaves a clear resume point:
+
+1. **recorded** — both WAV tracks are on disk; nothing transcribed yet.
+2. **transcribed** — `mic.json` and `system.json` exist (empty `[]` for
+   any track that never recorded any audio).
+3. **merged** — `transcript.md` has been assembled from the two JSONs.
+4. **completed** — audio and intermediates are cleaned up per `debug` and
+   `save_audio` (see [Session folder cleanup](#session-folder-cleanup)).
+
+`meet process` reads this stage and only does the work that's still
+missing; `--force` walks a session through every stage again from
+`recorded`, even if it already reached `completed`. A session completed
+with `save_audio = false` has no audio left to re-transcribe, so `--force`
+on it fails with an error instead of silently overwriting the transcript.
