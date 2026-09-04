@@ -1,5 +1,21 @@
 import Foundation
 
+public enum PipelineError: Error, LocalizedError {
+    /// `--force` was requested on a session that no longer has any audio
+    /// track to re-transcribe — it was completed with `save_audio = false`,
+    /// which deletes the WAVs and never writes an m4a. Re-transcribing is
+    /// impossible, so this must be refused before the stage reset or the
+    /// existing transcript is touched.
+    case noAudioToReprocess
+
+    public var errorDescription: String? {
+        switch self {
+        case .noAudioToReprocess:
+            return "no audio tracks to re-transcribe; the session was recorded with save_audio = false"
+        }
+    }
+}
+
 public struct Pipeline: Sendable {
     public var config: Config
 
@@ -9,6 +25,9 @@ public struct Pipeline: Sendable {
                         progress: (@Sendable (String) -> Void)? = nil) throws {
         var meta = try session.loadMeta()
         if force, meta.stage > .recorded {
+            guard hasAnyAudio(session: session) else {
+                throw PipelineError.noAudioToReprocess
+            }
             // Persist the reset *before* any work starts. Otherwise a --force
             // rerun that fails partway leaves meta at `completed` alongside
             // half-replaced artifacts, and a plain `meet process` then skips
@@ -50,15 +69,45 @@ public struct Pipeline: Sendable {
         }
 
         if meta.stage == .merged {
-            progress?("compressing audio")
-            for (wav, m4a) in [(session.micWAV, session.micM4A),
-                               (session.systemWAV, session.systemM4A)] {
-                if FileManager.default.fileExists(atPath: wav.path) {
-                    try AudioCompressor.compress(wav: wav, to: m4a)
+            // `debug` keeps everything the pre-cleanup pipeline used to leave
+            // behind, regardless of `save_audio`. Otherwise, audio is either
+            // compressed to m4a (save_audio = true, the default) or deleted
+            // outright (save_audio = false) — and the STT/log intermediates
+            // are always removed once debug is off. meta.json is never
+            // touched here, so it survives every combination.
+            if config.debug || config.saveAudio {
+                progress?("compressing audio")
+                for (wav, m4a) in [(session.micWAV, session.micM4A),
+                                   (session.systemWAV, session.systemM4A)] {
+                    if FileManager.default.fileExists(atPath: wav.path) {
+                        try AudioCompressor.compress(wav: wav, to: m4a)
+                    }
+                }
+            } else {
+                progress?("deleting audio")
+                for wav in [session.micWAV, session.systemWAV] {
+                    try? FileManager.default.removeItem(at: wav)
+                }
+            }
+            if !config.debug {
+                for url in [session.micJSON, session.systemJSON, session.logFile] {
+                    try? FileManager.default.removeItem(at: url)
                 }
             }
             meta.stage = .completed
             try session.saveMeta(meta)
+        }
+    }
+
+    /// Whether either track still has audio to transcribe from — a WAV (still
+    /// recorded, not yet cleaned up) or an m4a (already compressed). False
+    /// once a session was completed with `save_audio = false`, which leaves
+    /// neither behind for either track.
+    private func hasAnyAudio(session: Session) -> Bool {
+        let fm = FileManager.default
+        let tracks = [(session.micWAV, session.micM4A), (session.systemWAV, session.systemM4A)]
+        return tracks.contains { wav, m4a in
+            fm.fileExists(atPath: wav.path) || fm.fileExists(atPath: m4a.path)
         }
     }
 

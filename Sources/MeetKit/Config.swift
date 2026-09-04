@@ -5,11 +5,15 @@ public struct Config: Equatable, Sendable {
     public var recordingsDir: URL
     public var sttCommand: String
     public var transcript: TranscriptOptions
+    public var debug: Bool
+    public var saveAudio: Bool
 
     public static let `default` = Config(
         recordingsDir: URL(fileURLWithPath: NSString(string: "~/MeetingRecordings").expandingTildeInPath),
         sttCommand: "parakeet-mlx {audio} --output-format json --output-dir {outdir}",
-        transcript: TranscriptOptions()
+        transcript: TranscriptOptions(),
+        debug: false,
+        saveAudio: true
     )
 
     public static func load(path: URL) throws -> Config {
@@ -30,6 +34,8 @@ public struct Config: Equatable, Sendable {
             if let me = t["speaker_me"]?.string { cfg.transcript.speakerMe = me }
             if let them = t["speaker_them"]?.string { cfg.transcript.speakerThem = them }
         }
+        if let debug = table["debug"]?.bool { cfg.debug = debug }
+        if let saveAudio = table["save_audio"]?.bool { cfg.saveAudio = saveAudio }
         return cfg
     }
 

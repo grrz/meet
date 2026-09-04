@@ -62,16 +62,102 @@ final class PipelineTests: XCTestCase {
         XCTAssertTrue(transcript.contains("00:00:01 Me: mic speech"))
         XCTAssertTrue(transcript.contains("Them: system speech"))
 
+        // Default config: debug = false, save_audio = true — audio is kept as
+        // m4a, but the intermediate STT/log files are cleaned up.
+        let fm = FileManager.default
+        XCTAssertFalse(fm.fileExists(atPath: session.micWAV.path))
+        XCTAssertTrue(fm.fileExists(atPath: session.micM4A.path))
+        XCTAssertTrue(fm.fileExists(atPath: session.systemM4A.path))
+        XCTAssertFalse(fm.fileExists(atPath: session.micJSON.path))
+        XCTAssertFalse(fm.fileExists(atPath: session.systemJSON.path))
+        XCTAssertFalse(fm.fileExists(atPath: session.logFile.path))
+        XCTAssertTrue(fm.fileExists(atPath: session.metaJSON.path))
+    }
+
+    /// debug = true keeps the pre-cleanup intermediate files regardless of
+    /// save_audio, for inspecting a session's raw STT output and log.
+    func testDebugKeepsIntermediateFiles() throws {
+        var debugConfig = config!
+        debugConfig.debug = true
+        debugConfig.saveAudio = false // must be ignored while debug is true
+        let session = try makeRecordedSession()
+        try Pipeline(config: debugConfig).process(session: session)
+
+        XCTAssertEqual(try session.loadMeta().stage, .completed)
         let fm = FileManager.default
         XCTAssertFalse(fm.fileExists(atPath: session.micWAV.path))
         XCTAssertTrue(fm.fileExists(atPath: session.micM4A.path))
         XCTAssertTrue(fm.fileExists(atPath: session.systemM4A.path))
         XCTAssertTrue(fm.fileExists(atPath: session.micJSON.path))
+        XCTAssertTrue(fm.fileExists(atPath: session.systemJSON.path))
+        XCTAssertTrue(fm.fileExists(atPath: session.logFile.path))
+        XCTAssertTrue(fm.fileExists(atPath: session.metaJSON.path))
+    }
+
+    /// debug = false, save_audio = false: no m4a is ever created, the WAVs
+    /// are deleted directly, and the folder ends up with just the transcript
+    /// and meta.json.
+    func testSaveAudioFalseDeletesWavWithoutCompressing() throws {
+        var cfg = config!
+        cfg.saveAudio = false
+        let session = try makeRecordedSession()
+        try Pipeline(config: cfg).process(session: session)
+
+        XCTAssertEqual(try session.loadMeta().stage, .completed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: session.transcriptMD.path))
+
+        let fm = FileManager.default
+        XCTAssertFalse(fm.fileExists(atPath: session.micWAV.path))
+        XCTAssertFalse(fm.fileExists(atPath: session.systemWAV.path))
+        XCTAssertFalse(fm.fileExists(atPath: session.micM4A.path))
+        XCTAssertFalse(fm.fileExists(atPath: session.systemM4A.path))
+        XCTAssertFalse(fm.fileExists(atPath: session.micJSON.path))
+        XCTAssertFalse(fm.fileExists(atPath: session.systemJSON.path))
+        XCTAssertFalse(fm.fileExists(atPath: session.logFile.path))
+        XCTAssertTrue(fm.fileExists(atPath: session.metaJSON.path))
+    }
+
+    /// Cleanup removal is best-effort: a track that never recorded (no WAV
+    /// ever written for it) must not make the final stage fail when its
+    /// removal is attempted.
+    func testCleanupIsBestEffortWhenFilesAlreadyMissing() throws {
+        var cfg = config!
+        cfg.saveAudio = false
+        let session = try makeRecordedSession(withSystemTrack: false)
+        try Pipeline(config: cfg).process(session: session)
+        XCTAssertEqual(try session.loadMeta().stage, .completed)
+    }
+
+    /// A session recorded with save_audio = false has no audio left once
+    /// completed. Forcing a re-transcribe must refuse clearly, and must not
+    /// touch the stage or the existing transcript first.
+    func testForceReprocessWithoutAudioThrows() throws {
+        var cfg = config!
+        cfg.saveAudio = false
+        let session = try makeRecordedSession()
+        let pipeline = Pipeline(config: cfg)
+        try pipeline.process(session: session)
+        XCTAssertEqual(try session.loadMeta().stage, .completed)
+        let transcriptBefore = try String(contentsOf: session.transcriptMD, encoding: .utf8)
+
+        XCTAssertThrowsError(try pipeline.process(session: session, force: true)) { error in
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("save_audio = false"), message)
+        }
+
+        // Refused before doing any work: stage and transcript are untouched.
+        XCTAssertEqual(try session.loadMeta().stage, .completed)
+        let transcriptAfter = try String(contentsOf: session.transcriptMD, encoding: .utf8)
+        XCTAssertEqual(transcriptBefore, transcriptAfter)
     }
 
     func testMissingTrackYieldsEmptySegments() throws {
+        // debug = true so the intermediate mic.json/pipeline.log this test
+        // inspects survive the final cleanup stage.
+        var debugConfig = config!
+        debugConfig.debug = true
         let session = try makeRecordedSession(withSystemTrack: false)
-        try Pipeline(config: config).process(session: session)
+        try Pipeline(config: debugConfig).process(session: session)
         let systemSegs = try SegmentParser.parse(Data(contentsOf: session.systemJSON))
         XCTAssertEqual(systemSegs, [])
         XCTAssertEqual(try session.loadMeta().stage, .completed)
@@ -165,7 +251,10 @@ final class PipelineTests: XCTestCase {
         meta.endedAt = Date()
         try session.saveMeta(meta)
 
-        try Pipeline(config: config).process(session: session)
+        // debug = true so pipeline.log, inspected below, survives cleanup.
+        var debugConfig = config!
+        debugConfig.debug = true
+        try Pipeline(config: debugConfig).process(session: session)
 
         XCTAssertEqual(try session.loadMeta().stage, .completed)
         let transcript = try String(contentsOf: session.transcriptMD, encoding: .utf8)

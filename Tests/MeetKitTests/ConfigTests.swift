@@ -7,6 +7,23 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(cfg, Config.default)
         XCTAssertTrue(cfg.sttCommand.contains("parakeet-mlx"))
         XCTAssertEqual(cfg.transcript.speakerMe, "Me")
+        XCTAssertFalse(cfg.debug)
+        XCTAssertTrue(cfg.saveAudio)
+    }
+
+    func testDebugAndSaveAudioOverride() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("config.toml")
+        try """
+        debug = true
+        save_audio = false
+        """.write(to: path, atomically: true, encoding: .utf8)
+
+        let cfg = try Config.load(path: path)
+        XCTAssertTrue(cfg.debug)
+        XCTAssertFalse(cfg.saveAudio)
     }
 
     func testPartialFileOverridesOnlyGivenKeys() throws {
@@ -26,6 +43,8 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(cfg.transcript.speakerMe, "Greg")
         XCTAssertEqual(cfg.transcript.speakerThem, "Them")       // default kept
         XCTAssertEqual(cfg.sttCommand, Config.default.sttCommand) // default kept
+        XCTAssertFalse(cfg.debug)                                 // default kept
+        XCTAssertTrue(cfg.saveAudio)                              // default kept
     }
 
     func testTildeExpansion() throws {
