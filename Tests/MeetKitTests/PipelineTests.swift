@@ -59,8 +59,8 @@ final class PipelineTests: XCTestCase {
         XCTAssertEqual(meta.engineCommand, config.sttCommand)
 
         let transcript = try String(contentsOf: session.transcriptMD, encoding: .utf8)
-        XCTAssertTrue(transcript.contains("**[00:00:01] Me:** mic speech"))
-        XCTAssertTrue(transcript.contains("Them:** system speech"))
+        XCTAssertTrue(transcript.contains("00:00:01 Me: mic speech"))
+        XCTAssertTrue(transcript.contains("Them: system speech"))
 
         let fm = FileManager.default
         XCTAssertFalse(fm.fileExists(atPath: session.micWAV.path))

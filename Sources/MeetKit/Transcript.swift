@@ -54,7 +54,7 @@ public enum Transcript {
             lines.append("_(no speech recognized)_")
         } else {
             for u in utterances {
-                lines.append("**[\(timecode(u.start))] \(u.speaker):** \(u.text)")
+                lines.append("\(timecode(u.start)) \(u.speaker): \(u.text)")
             }
         }
         return lines.joined(separator: "\n") + "\n"

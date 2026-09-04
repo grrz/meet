@@ -12,8 +12,8 @@ final class TranscriptTests: XCTestCase {
         XCTAssertEqual(md, """
         # Call 2026-09-03 14:20 (52 min)
 
-        **[00:00:03] Them:** Hi Greg, can you hear me?
-        **[00:00:06] Me:** Yes, loud and clear.
+        00:00:03 Them: Hi Greg, can you hear me?
+        00:00:06 Me: Yes, loud and clear.
 
         """)
     }
@@ -25,8 +25,8 @@ final class TranscriptTests: XCTestCase {
                  Segment(text: "Next topic.", start: 20, end: 21)],
             them: [],
             title: "T", durationSeconds: 30, options: opts)
-        XCTAssertTrue(md.contains("**[00:00:10] Me:** So, let's start."))
-        XCTAssertTrue(md.contains("**[00:00:20] Me:** Next topic."))
+        XCTAssertTrue(md.contains("00:00:10 Me: So, let's start."))
+        XCTAssertTrue(md.contains("00:00:20 Me: Next topic."))
     }
 
     func testEmptyTracksProducePlaceholderLine() {
@@ -40,6 +40,6 @@ final class TranscriptTests: XCTestCase {
         let md = Transcript.assemble(
             me: [Segment(text: "still here", start: 3725, end: 3726)],
             them: [], title: "T", durationSeconds: 3800, options: opts)
-        XCTAssertTrue(md.contains("**[01:02:05] Me:**"))
+        XCTAssertTrue(md.contains("01:02:05 Me:"))
     }
 }
