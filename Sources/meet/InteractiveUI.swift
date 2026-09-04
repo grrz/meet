@@ -15,6 +15,14 @@ final class InteractiveUI: @unchecked Sendable {
     private var savedTermios = termios()
     private var rawModeEnabled = false
 
+    // Reset whenever a new recording starts (see toggleRecording). Fed once
+    // per redrawStatus tick so a paused recording keeps their clocks from
+    // false-triggering on the frozen duration a pause legitimately causes.
+    private var micStallDetector = StallDetector()
+    private var systemStallDetector = StallDetector()
+    private var micWasStalled = false
+    private var systemWasStalled = false
+
     private let pipelineQueue = DispatchQueue(label: "meet.pipeline", qos: .userInitiated)
     private let pipelineGroup = DispatchGroup()
     private let stateLock = NSLock()
@@ -122,6 +130,10 @@ final class InteractiveUI: @unchecked Sendable {
         } else {
             do {
                 recording = try RecordingSession(store: store, config: config)
+                micStallDetector = StallDetector()
+                systemStallDetector = StallDetector()
+                micWasStalled = false
+                systemWasStalled = false
             } catch {
                 printLine("cannot start recording: \(error.localizedDescription)")
             }
@@ -172,11 +184,32 @@ final class InteractiveUI: @unchecked Sendable {
         var left = "idle"
         if let recording {
             let time = Transcript.timecode(recording.elapsedSeconds)
+
+            // Fed every tick regardless of pause state so the detectors'
+            // clocks stay in sync with wall time; StallDetector itself
+            // treats a paused tick as never-stalled and resets its window.
+            let now = Date()
+            let micStalled = micStallDetector.update(
+                duration: recording.micDurationSeconds, isPaused: recording.isPaused, now: now)
+            let systemStalled = systemStallDetector.update(
+                duration: recording.systemDurationSeconds, isPaused: recording.isPaused, now: now)
+            if micStalled, !micWasStalled {
+                printLine("⚠ mic track stopped advancing — check your input device")
+            }
+            if systemStalled, !systemWasStalled {
+                printLine("⚠ system track stopped advancing — check your input device")
+            }
+            micWasStalled = micStalled
+            systemWasStalled = systemStalled
+
             if recording.isPaused {
                 left = "‖ paused \(time)"
             } else {
-                let micMark = recording.micHealthy ? "✓" : "✗"
-                let sysMark = recording.systemHealthy ? "✓" : "✗"
+                // An unhealthy recorder wins over a stalled one: ✗ means the
+                // recorder itself reported a hard failure, ⚠ means it still
+                // looks healthy but stopped producing audio.
+                let micMark = !recording.micHealthy ? "✗" : (micStalled ? "⚠" : "✓")
+                let sysMark = !recording.systemHealthy ? "✗" : (systemStalled ? "⚠" : "✓")
                 left = "● rec \(time)  mic \(micMark)  system \(sysMark)"
             }
         }
