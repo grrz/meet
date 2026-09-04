@@ -219,12 +219,18 @@ public final class MicRecorder {
         rebuildScheduled = false
         removeConfigurationChangeObserver()
         removeDefaultInputDeviceListener()
-        if let engine {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-        }
         // Release the engine, not just stop it — see the property's comment.
-        engine = nil
+        // Inside an explicit pool because the CLI's main thread never drains
+        // an autorelease pool of its own: anything AVFoundation autoreleases
+        // on the way out (`inputNode`, internals) should be gone before this
+        // returns, not whenever the process happens to drain next.
+        autoreleasepool {
+            if let engine {
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+            }
+            engine = nil
+        }
         stateLock.lock()
         writer?.finalize()
         stateLock.unlock()
@@ -251,18 +257,34 @@ public final class MicRecorder {
     /// with `finalize()` closing the same file in `stop()`.
     ///
     /// `generation` is the engine the calling tap belongs to. A buffer from a
-    /// discarded engine is dropped rather than written, because the writer's
-    /// converter has already been rebuilt for the new engine's format. The
-    /// rate/channel check behind it is a cheap belt for the same hazard.
+    /// discarded engine is dropped silently — that is the expected outcome of
+    /// a rebuild, since the writer's converter has already been swapped for
+    /// the new engine's format and pushing the old format through it would
+    /// either fail the conversion or trip an exception inside it.
+    ///
+    /// A buffer from the *current* engine whose format still disagrees with
+    /// the writer's would mean the engine changed format under a live tap,
+    /// which is not supposed to happen. It is dropped too — converting it
+    /// would silently record at the wrong speed — but it throws on the way
+    /// out so the caller flips the track unhealthy and the status line shows
+    /// ✗ instead of a track that looks fine and writes nothing.
     private func writeLocked(_ buffer: AVAudioPCMBuffer, generation: UInt64) throws {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard generation == _generation, let writer else { return }
         let expected = writer.sourceFormat
         guard buffer.format.sampleRate == expected.sampleRate,
-              buffer.format.channelCount == expected.channelCount else { return }
+              buffer.format.channelCount == expected.channelCount else {
+            throw UnexpectedTapFormat()
+        }
         try writer.write(buffer)
     }
+
+    /// Thrown by `writeLocked` only; never surfaced to a caller. `setHealthy`
+    /// must not be called from inside `writeLocked` — `stateLock` is not
+    /// recursive and `setHealthy` takes it — so the tap block's `catch` is
+    /// what reports this, after the lock is released.
+    private struct UnexpectedTapFormat: Error {}
 
     // MARK: - recovery
 
@@ -377,11 +399,13 @@ public final class MicRecorder {
         emit("\(reason); rebuilding audio engine")
 
         removeConfigurationChangeObserver()
-        if let oldEngine = engine {
-            oldEngine.stop()
-            oldEngine.inputNode.removeTap(onBus: 0)
+        autoreleasepool {
+            if let oldEngine = engine {
+                oldEngine.stop()
+                oldEngine.inputNode.removeTap(onBus: 0)
+            }
+            engine = nil
         }
-        engine = nil
 
         let newEngine = AVAudioEngine()
         let newFormat = newEngine.inputNode.outputFormat(forBus: 0)
