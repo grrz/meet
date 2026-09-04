@@ -6,6 +6,11 @@ import Foundation
 /// Not thread-safe for concurrent calls to `pause()`/`resume()`/`stop()` —
 /// callers (the CLI, the future status-line loop) are expected to serialize
 /// these on a single control thread/queue.
+///
+/// The recorders' lifecycle events land on `AudioControl.queue`, so the
+/// `onEvent` closures installed below run there rather than on the caller's
+/// thread; they only append to the session log, which is why `appendLog`
+/// takes a lock.
 public final class RecordingSession {
     public let session: Session
     private let mic: MicRecorder
@@ -93,6 +98,14 @@ public final class RecordingSession {
         return session
     }
 
+    /// Serializes `appendLog`. The two recorders' `onEvent` callbacks already
+    /// arrive on one serial queue (`AudioControl.queue`), so they cannot
+    /// interleave with each other, but the pipeline writes to the same file
+    /// from its own queue once a session is being processed — and
+    /// open/seek-to-end/write/close is not atomic, so two writers can produce
+    /// a torn line.
+    private static let logLock = NSLock()
+
     /// Appends a timestamped line to the session's pipeline log — same
     /// format as `Pipeline`'s log helper. Used to record recorder lifecycle
     /// events (device-change rebuilds, rebuild failures) that don't fit the
@@ -100,7 +113,11 @@ public final class RecordingSession {
     /// Static, and takes `session` explicitly, so it can be used from the
     /// recorder `onEvent` closures set up during `init()`, before `self` is
     /// fully initialized.
+    ///
+    /// Called on `AudioControl.queue`, never on the caller's thread.
     private static func appendLog(_ message: String, to session: Session) {
+        logLock.lock()
+        defer { logLock.unlock() }
         let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
         if let handle = try? FileHandle(forWritingTo: session.logFile) {
             _ = try? handle.seekToEnd()

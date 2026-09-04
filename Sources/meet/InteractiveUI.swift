@@ -197,7 +197,10 @@ final class InteractiveUI: @unchecked Sendable {
                 printLine("⚠ mic track stopped advancing — check your input device")
             }
             if systemStalled, !systemWasStalled {
-                printLine("⚠ system track stopped advancing — check your input device")
+                // The system track records the default *output* device's
+                // mixdown, not an input, so pointing at the input device here
+                // sent people to the wrong half of Sound settings.
+                printLine("⚠ system track stopped advancing — check your output device")
             }
             micWasStalled = micStalled
             systemWasStalled = systemStalled
