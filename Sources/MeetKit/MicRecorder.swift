@@ -1,4 +1,6 @@
+import AudioToolbox
 import AVFoundation
+import CoreAudio
 import Foundation
 
 /// Errors thrown by `MicRecorder`.
@@ -28,10 +30,26 @@ public enum MicRecorderError: Error, LocalizedError {
 /// `MicRecorder` for a new recording. This matches how Task 12 uses it: one
 /// fresh instance per session.
 public final class MicRecorder {
-    private let engine = AVAudioEngine()
+    /// Rebuilt from scratch on every recovery — see `rebuildEngine()`.
+    /// Reinstalling a tap on a post-configuration-change engine is what
+    /// silently stopped delivering buffers in production (macOS tears down
+    /// more than the tap when the default input device changes), so
+    /// recovery always discards this instance and creates a new one rather
+    /// than reusing it.
+    private var engine = AVAudioEngine()
     private let outputURL: URL
     private var writer: WavWriter?
+    /// Observes `.AVAudioEngineConfigurationChange` on the *current* engine
+    /// instance; re-subscribed to the new engine at the end of every
+    /// rebuild, since the old observer would otherwise watch a discarded
+    /// object.
     private var observer: NSObjectProtocol?
+    /// CoreAudio listener on the system's default input device, independent
+    /// of the engine-configuration-change notification: a device switch
+    /// does not always fire `.AVAudioEngineConfigurationChange` promptly (or
+    /// at all) in every combination of driver/OS, so both signals feed the
+    /// same rebuild path. Installed once in `start()`, removed in `stop()`.
+    private var defaultInputListenerBlock: AudioObjectPropertyListenerBlock?
 
     /// Guards every field the audio-render thread and the main thread both
     /// touch: `_paused`, `_isHealthy`, `_stopped`, and access to `writer`
@@ -45,8 +63,22 @@ public final class MicRecorder {
     private var _isHealthy = true
     private var _stopped = false
 
+    /// Set when a rebuild has been queued on the main queue and cleared
+    /// once it actually runs. Both recovery signals land on the main queue
+    /// (the configuration-change notification is delivered there, and the
+    /// CoreAudio listener block is installed on `.main`), so this flag —
+    /// touched only from the main queue — is enough to coalesce a
+    /// double-fire (e.g. both signals for the same device switch) into a
+    /// single rebuild without needing its own lock.
+    private var rebuildScheduled = false
+
     /// Called on the main queue when health changes (for the status line).
     public var onHealthChange: ((Bool) -> Void)?
+
+    /// Called on the main queue with a short, English, one-line description
+    /// of a lifecycle event (device-change rebuild starting, succeeding, or
+    /// failing) — for the session log, not for control flow.
+    public var onEvent: ((String) -> Void)?
 
     /// Atomic; drops buffers while true.
     public var paused: Bool {
@@ -95,13 +127,8 @@ public final class MicRecorder {
             throw error
         }
 
-        // The engine stops itself when the default input device changes or dies.
-        observer = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine, queue: .main
-        ) { [weak self] _ in
-            self?.recoverFromConfigurationChange()
-        }
+        subscribeToConfigurationChange()
+        installDefaultInputDeviceListener()
     }
 
     private func installTap(format: AVAudioFormat) {
@@ -126,14 +153,101 @@ public final class MicRecorder {
         try writer?.write(buffer)
     }
 
-    private func recoverFromConfigurationChange() {
+    // MARK: - recovery
+
+    /// The engine stops itself when the default input device changes or
+    /// dies. Re-subscribed after every rebuild since the previous observer
+    /// watched the now-discarded engine instance.
+    private func subscribeToConfigurationChange() {
+        observer = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine, queue: .main
+        ) { [weak self] _ in
+            self?.requestRebuild()
+        }
+    }
+
+    /// A device switch (e.g. Zoom moving the default input from the built-in
+    /// mic to a Bluetooth headset) doesn't reliably fire
+    /// `.AVAudioEngineConfigurationChange` in time, or at all, on every
+    /// macOS/driver combination — that gap is exactly what silently dropped
+    /// 55 minutes of mic audio in production, since nothing else was
+    /// watching. This CoreAudio listener on the system's default input
+    /// device is the second, independent signal into the same rebuild path.
+    /// Mirrors `SystemAudioRecorder`'s default-output listener: the
+    /// `stopped` guard, and installed once / removed in `stop()`.
+    private func installDefaultInputDeviceListener() {
+        guard defaultInputListenerBlock == nil else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self, !self.stopped else { return }
+            self.requestRebuild()
+        }
+        defaultInputListenerBlock = block
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, .main, block)
+    }
+
+    private func removeDefaultInputDeviceListener() {
+        guard let block = defaultInputListenerBlock else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, .main, block)
+        defaultInputListenerBlock = nil
+    }
+
+    /// Funnels both recovery signals into one debounced, deferred rebuild.
+    /// Both signals already land on the main queue synchronously with the
+    /// system event; deferring via `DispatchQueue.main.async` and gating on
+    /// `rebuildScheduled` means a configuration-change notification and a
+    /// default-device notification for the *same* switch coalesce into a
+    /// single `rebuildEngine()` call instead of two back-to-back ones.
+    private func requestRebuild() {
+        guard !stopped, !rebuildScheduled else { return }
+        rebuildScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.performRebuild()
+        }
+    }
+
+    private func performRebuild() {
+        rebuildScheduled = false
         guard !stopped else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        let newFormat = engine.inputNode.outputFormat(forBus: 0)
-        guard newFormat.sampleRate > 0 else {
+        rebuildEngine()
+    }
+
+    /// Discards the old engine entirely and builds a fresh one: stop + untap
+    /// the old engine, create a new `AVAudioEngine`, validate its input
+    /// format, point the writer at it, install a tap, and start. This is
+    /// deliberately not "remove tap → reinstall on the same engine →
+    /// restart" — that path is exactly what looked healthy but silently
+    /// stopped receiving buffers after a device switch in production.
+    private func rebuildEngine() {
+        onEventAsync("input device changed; rebuilding audio engine")
+
+        let oldEngine = engine
+        oldEngine.stop()
+        oldEngine.inputNode.removeTap(onBus: 0)
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
+
+        let newEngine = AVAudioEngine()
+        engine = newEngine
+        subscribeToConfigurationChange()
+
+        let newFormat = newEngine.inputNode.outputFormat(forBus: 0)
+        guard newFormat.sampleRate > 0, newFormat.channelCount > 0 else {
             setHealthy(false)
+            onEventAsync("audio engine rebuild failed: no input device available")
             return
         }
+
         // Locked: a straggler tap callback from the outgoing tap may still
         // be inside writeLocked(), using the writer's current converter,
         // when this runs — without the lock both threads could mutate the
@@ -141,10 +255,13 @@ public final class MicRecorder {
         stateLock.withLock { writer?.updateSourceFormat(newFormat) }
         installTap(format: newFormat)
         do {
-            try engine.start()
+            try newEngine.start()
             setHealthy(true)
+            onEventAsync("audio engine rebuilt (rate=\(Int(newFormat.sampleRate)), "
+                         + "ch=\(newFormat.channelCount))")
         } catch {
             setHealthy(false)
+            onEventAsync("audio engine rebuild failed: \(error.localizedDescription)")
         }
     }
 
@@ -158,10 +275,15 @@ public final class MicRecorder {
         DispatchQueue.main.async { self.onHealthChange?(value) }
     }
 
+    private func onEventAsync(_ message: String) {
+        DispatchQueue.main.async { self.onEvent?(message) }
+    }
+
     public func stop() {
         stopped = true
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = nil
+        removeDefaultInputDeviceListener()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         stateLock.lock()

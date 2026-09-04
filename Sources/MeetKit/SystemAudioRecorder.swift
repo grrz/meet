@@ -80,6 +80,12 @@ public final class SystemAudioRecorder {
     }
 
     public var onHealthChange: ((Bool) -> Void)?
+
+    /// Called on the main queue with a short, English, one-line description
+    /// of a lifecycle event (device/rate-change rebuild starting,
+    /// succeeding, or failing) — for the session log, not for control flow.
+    public var onEvent: ((String) -> Void)?
+
     public var durationSeconds: Double { writer?.durationSeconds ?? 0 }
 
     public init(outputURL: URL) { self.outputURL = outputURL }
@@ -241,7 +247,7 @@ public final class SystemAudioRecorder {
             // deferred work.
             DispatchQueue.main.async {
                 guard !self.stopped else { return }
-                self.rebuildAfterFormatChange()
+                self.rebuildAfterFormatChange(reason: "sample rate changed")
             }
         }
         rateListenerBlock = block
@@ -263,14 +269,22 @@ public final class SystemAudioRecorder {
 
     /// Teardown + rebuild keeping the same WAV file open. Shared by the
     /// default-output-device path and the sample-rate path, which need
-    /// identical handling: both invalidate the capture format.
-    private func rebuildAfterFormatChange() {
+    /// identical handling: both invalidate the capture format. `reason` is
+    /// a short label for the triggering signal, used only for the emitted
+    /// event text.
+    private func rebuildAfterFormatChange(reason: String) {
+        onEventAsync("\(reason); rebuilding audio capture chain")
         teardownCaptureChain()
         do {
             try buildCaptureChain()
             setHealthy(true)
+            if let tapFormat {
+                onEventAsync("audio capture chain rebuilt (rate=\(Int(tapFormat.sampleRate)), "
+                             + "ch=\(tapFormat.channelCount))")
+            }
         } catch {
             setHealthy(false)
+            onEventAsync("audio capture chain rebuild failed: \(error.localizedDescription)")
         }
     }
 
@@ -285,7 +299,7 @@ public final class SystemAudioRecorder {
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self, !self.stopped else { return }
-            self.rebuildAfterFormatChange()
+            self.rebuildAfterFormatChange(reason: "output device changed")
         }
         defaultDeviceListenerBlock = block
         AudioObjectAddPropertyListenerBlock(
@@ -332,6 +346,10 @@ public final class SystemAudioRecorder {
         }
         guard changed else { return }
         DispatchQueue.main.async { self.onHealthChange?(value) }
+    }
+
+    private func onEventAsync(_ message: String) {
+        DispatchQueue.main.async { self.onEvent?(message) }
     }
 
     public func stop() {
