@@ -7,25 +7,44 @@ engine. Runs entirely on your Mac: no audio or transcript leaves the
 machine unless you point the STT command at something that sends it
 somewhere.
 
-## Requirements
+## Getting started (prebuilt binary)
 
-- macOS 15 or later.
-- A Swift toolchain to build (Swift 6, ships with recent Xcode / Xcode
-  Command Line Tools).
-- An STT command-line engine on your `PATH`. The default is
-  [`parakeet-mlx`](https://github.com/senstella/parakeet-mlx), Apple
-  Silicon-only:
-  ```
-  uv tool install parakeet-mlx
-  ```
-  or
-  ```
-  pipx install parakeet-mlx
-  ```
-  The default model is `parakeet-tdt-0.6b-v3`, which is multilingual and
-  auto-detects language per utterance.
+Grab the `meet` binary from the [latest
+release](https://github.com/grrz/meet/releases/latest). To use it you need
+an Apple Silicon Mac on macOS 15 or later, plus:
 
-## Install
+1. **Put the binary on your `PATH`.** If you downloaded it through a
+   browser, macOS quarantines it first — clear that and make it
+   executable:
+   ```
+   xattr -d com.apple.quarantine ./meet
+   chmod +x ./meet
+   mv ./meet ~/.local/bin/   # or anywhere on your PATH
+   ```
+   (`gh release download` and `curl` don't set the quarantine flag.)
+2. **Install the STT engine.** The default is
+   [`parakeet-mlx`](https://github.com/senstella/parakeet-mlx) (Apple
+   Silicon-only; the default model `parakeet-tdt-0.6b-v3` is multilingual
+   and auto-detects language per utterance):
+   ```
+   uv tool install parakeet-mlx
+   ```
+   or
+   ```
+   pipx install parakeet-mlx
+   ```
+3. **Grant permissions.** Microphone prompts on first run; **System Audio
+   Recording never prompts** and must be granted manually to your terminal
+   app in advance — see [Permissions](#permissions). Without it, recordings
+   of the other side are silent.
+4. **Config is optional** — `meet` works with built-in defaults; see
+   [Configuration](#configuration) to change paths, speaker labels, or the
+   STT engine.
+
+## Building from source
+
+Requires a Swift 6 toolchain (ships with recent Xcode / Xcode Command Line
+Tools):
 
 ```
 make install                 # builds a release binary, installs it as `meet`
@@ -38,10 +57,8 @@ This installs into `$HOME/.local/bin` by default; make sure that's on your
 make install PREFIX=/usr/local/bin
 ```
 
-Building from source needs the Swift toolchain (see Requirements above);
-once `meet` is built and installed, running it only needs the `meet`
-binary itself and `parakeet-mlx` (or your chosen STT engine) on `PATH` —
-no toolchain required at runtime.
+The toolchain is only needed to build: at runtime `meet` needs just the
+binary itself and `parakeet-mlx` (or your chosen STT engine) on `PATH`.
 
 ## Usage
 
