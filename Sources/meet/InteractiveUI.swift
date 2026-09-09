@@ -52,7 +52,7 @@ final class InteractiveUI: @unchecked Sendable {
             guard let key = readKey(timeoutMS: 1000) else { continue }
             switch key {
             case UInt8(ascii: "z"): toggleRecording()
-            case UInt8(ascii: " "): togglePause()
+            case UInt8(ascii: " "): handleSpace()
             case UInt8(ascii: "q"), 0x04: quit()          // 0x04 = Ctrl+D
             default: break
             }
@@ -140,8 +140,13 @@ final class InteractiveUI: @unchecked Sendable {
         }
     }
 
-    private func togglePause() {
-        guard let recording else { return }
+    /// Space starts a recording when idle, and pauses/resumes an active one.
+    /// It never stops a recording — only `z` (or quitting) does.
+    private func handleSpace() {
+        guard let recording else {
+            toggleRecording()  // idle: space starts a new recording
+            return
+        }
         recording.isPaused ? recording.resume() : recording.pause()
     }
 
@@ -175,7 +180,7 @@ final class InteractiveUI: @unchecked Sendable {
     // MARK: rendering
 
     private func printHelp() {
-        print("meet — z: start/stop  space: pause  q: quit")
+        print("meet — z: start/stop  space: start/pause  q: quit")
     }
 
     private func redrawStatus() {

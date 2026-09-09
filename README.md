@@ -81,7 +81,7 @@ current recording:
 | Key     | Action                                  |
 |---------|------------------------------------------|
 | `z`     | Start a recording, or stop the current one |
-| `space` | Pause / resume the current recording     |
+| `space` | Start a recording when idle; pause / resume the current one (never stops it) |
 | `q`     | Quit (stops any active recording first)  |
 
 Stopping a recording queues it for transcription in the background, so you
