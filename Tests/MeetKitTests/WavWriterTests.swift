@@ -76,6 +76,26 @@ final class WavWriterTests: XCTestCase {
         XCTAssertEqual(writer.durationSeconds, 0.2, accuracy: 0.02)
     }
 
+    /// `MicRecorder` drops a straggler buffer from a discarded engine by
+    /// comparing it against the writer's current source format, so that format
+    /// has to be observable and has to follow `updateSourceFormat`.
+    func testSourceFormatIsReadableAndFollowsUpdates() throws {
+        let a = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)!
+        let b = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("w-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = try WavWriter(url: url, sourceFormat: a)
+        XCTAssertEqual(writer.sourceFormat.sampleRate, 44100)
+        XCTAssertEqual(writer.sourceFormat.channelCount, 2)
+
+        writer.updateSourceFormat(b)
+        XCTAssertEqual(writer.sourceFormat.sampleRate, 16000)
+        XCTAssertEqual(writer.sourceFormat.channelCount, 1)
+        writer.finalize()
+    }
+
     func testSourceFormatChangeMidStreamPreservesTail() throws {
         // A longer stream on each side of the switch than
         // testSourceFormatChangeMidStream, so the fixed per-switch converter

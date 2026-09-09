@@ -153,15 +153,11 @@ public struct Pipeline: Sendable {
         try data.write(to: json, options: .atomic)
     }
 
+    /// Appends a timestamped line to the session's pipeline log via the
+    /// shared `SessionLog` lock — see its doc comment for why writes need to
+    /// be serialized (`RecordingSession` writes to the same file from the
+    /// recorders' `onEvent` closures).
     private func log(session: Session, _ message: String) {
-        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
-        if let handle = try? FileHandle(forWritingTo: session.logFile) {
-            _ = try? handle.seekToEnd()
-            handle.write(line.data(using: .utf8)!)
-            _ = try? handle.close()
-        } else {
-            FileManager.default.createFile(atPath: session.logFile.path,
-                                           contents: line.data(using: .utf8))
-        }
+        SessionLog.append(message, to: session.logFile)
     }
 }

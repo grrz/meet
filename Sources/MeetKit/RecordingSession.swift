@@ -6,6 +6,11 @@ import Foundation
 /// Not thread-safe for concurrent calls to `pause()`/`resume()`/`stop()` —
 /// callers (the CLI, the future status-line loop) are expected to serialize
 /// these on a single control thread/queue.
+///
+/// The recorders' lifecycle events land on `AudioControl.queue`, so the
+/// `onEvent` closures installed below run there rather than on the caller's
+/// thread; they only append to the session log, which is why `appendLog`
+/// takes a lock.
 public final class RecordingSession {
     public let session: Session
     private let mic: MicRecorder
@@ -16,7 +21,9 @@ public final class RecordingSession {
     public var micHealthy: Bool { mic.isHealthy }
     public var systemHealthy: Bool { system.isHealthy }
     public var isPaused: Bool { currentPause != nil }
-    public var elapsedSeconds: Double { max(mic.durationSeconds, system.durationSeconds) }
+    public var micDurationSeconds: Double { mic.durationSeconds }
+    public var systemDurationSeconds: Double { system.durationSeconds }
+    public var elapsedSeconds: Double { max(micDurationSeconds, systemDurationSeconds) }
 
     /// Creates the session folder, writes the initial `meta.json` (stage
     /// `.recording`), and starts both recorders.
@@ -35,6 +42,11 @@ public final class RecordingSession {
 
         mic = MicRecorder(outputURL: session.micWAV)
         system = SystemAudioRecorder(outputURL: session.systemWAV)
+        // Capture `session` (a value type) rather than `self`, which isn't
+        // fully initialized yet at this point in init().
+        let loggedSession = session
+        mic.onEvent = { message in RecordingSession.appendLog(message, to: loggedSession) }
+        system.onEvent = { message in RecordingSession.appendLog(message, to: loggedSession) }
         try system.start()  // fail fast on missing TCC before touching the mic
         meta.systemStartedAt = Date()
         do {
@@ -78,9 +90,26 @@ public final class RecordingSession {
         mic.stop()
         system.stop()
         meta.endedAt = Date()
+        meta.micDurationSeconds = micDurationSeconds
+        meta.systemDurationSeconds = systemDurationSeconds
         meta.audioDurationSeconds = elapsedSeconds
         meta.stage = .recorded
         try session.saveMeta(meta)
         return session
+    }
+
+    /// Appends a timestamped line to the session's pipeline log via the
+    /// shared `SessionLog` lock — the same lock `Pipeline`'s log helper uses,
+    /// so the two writers (recorder lifecycle events here, processing-stage
+    /// messages there) can't interleave and produce a torn line. Used to
+    /// record recorder lifecycle events (device-change rebuilds, rebuild
+    /// failures) that don't fit the health flag but matter when reading back
+    /// what happened to a session. Static, and takes `session` explicitly, so
+    /// it can be used from the recorder `onEvent` closures set up during
+    /// `init()`, before `self` is fully initialized.
+    ///
+    /// Called on `AudioControl.queue`, never on the caller's thread.
+    private static func appendLog(_ message: String, to session: Session) {
+        SessionLog.append(message, to: session.logFile)
     }
 }

@@ -34,6 +34,12 @@ public enum SystemAudioError: Error, LocalizedError {
 /// `start()` on the same instance will not resume capture — create a new
 /// `SystemAudioRecorder` for a new recording. This matches how Task 12 uses
 /// it: one fresh instance per session.
+///
+/// Threading, mirroring `MicRecorder`: callers use the main thread and
+/// `start()`/`stop()` hop onto `AudioControl.queue` and wait; that queue owns
+/// the tap/aggregate/IOProc chain, both CoreAudio listeners and
+/// `rebuildScheduled`; the HAL IO thread runs the IOProc, which only writes a
+/// buffer, drops it, or flips the health flag.
 public final class SystemAudioRecorder {
     private let outputURL: URL
     private var writer: WavWriter?
@@ -47,17 +53,27 @@ public final class SystemAudioRecorder {
     /// every chain build and removed by every teardown.
     private var rateListenerBlock: AudioObjectPropertyListenerBlock?
     private var rateListenerDeviceID = AudioObjectID(kAudioObjectUnknown)
+    /// Set when a rebuild has been queued on the control queue and cleared
+    /// once it runs. Both signals — default output device and nominal sample
+    /// rate — fire together when a Bluetooth headset connects, and a single
+    /// rebuild reads the current device *and* the current rate, so coalescing
+    /// them saves one full teardown/rebuild of the aggregate device.
+    /// Control queue only, like every field above it.
+    private var rebuildScheduled = false
 
     /// Guards `_paused`, `_isHealthy`, and `_stopped` — touched from both
-    /// the HAL IO thread (via the IOProc block) and the main queue (via the
-    /// default-device and sample-rate listener blocks and public callers).
-    /// The IOProc's own
-    /// write/finalize race is already closed by a hard barrier:
+    /// the HAL IO thread (via the IOProc block) and the control queue (via
+    /// the default-device and sample-rate listener blocks) and by public
+    /// callers on the main thread.
+    ///
+    /// The IOProc's own write/finalize race is already closed by a hard
+    /// barrier, so this lock does not need to cover `writer` or `tapFormat`:
     /// `teardownCaptureChain()`'s calls to `AudioDeviceStop` and
-    /// `AudioDeviceDestroyIOProcID` are documented to block until no
-    /// further IOProc callback can fire, and `stop()` always runs
-    /// `teardownCaptureChain()` before it reaches `writer?.finalize()` — so
-    /// this lock does not need to cover `writer`.
+    /// `AudioDeviceDestroyIOProcID` are documented to block until no further
+    /// IOProc callback can fire, every path that touches those two fields runs
+    /// `teardownCaptureChain()` first (`stop()` before `writer?.finalize()`,
+    /// `rebuildAfterFormatChange` before the new format is installed), and the
+    /// new chain only starts delivering at `AudioDeviceStart`.
     private let stateLock = NSLock()
     private var _paused = false
     private var _isHealthy = true
@@ -71,7 +87,7 @@ public final class SystemAudioRecorder {
     public var isHealthy: Bool { stateLock.withLock { _isHealthy } }
 
     /// Set once by `stop()`; checked by both listener blocks so a
-    /// notification already queued on the main queue before `stop()` ran
+    /// notification already queued on the control queue before `stop()` ran
     /// can't rebuild a brand-new tap + aggregate device after the caller
     /// considers capture over.
     private var stopped: Bool {
@@ -79,14 +95,53 @@ public final class SystemAudioRecorder {
         set { stateLock.withLock { _stopped = newValue } }
     }
 
+    /// Called on `AudioControl.queue` when health changes (for the status
+    /// line). Set it before `start()`. Consumers must not block that queue;
+    /// calling `stop()` from it is safe.
     public var onHealthChange: ((Bool) -> Void)?
+
+    /// Called on `AudioControl.queue` with a short, English, one-line
+    /// description of a lifecycle event (device/rate-change rebuild starting,
+    /// succeeding, or failing) — for the session log, not for control flow.
+    /// Set it before `start()`. Consumers must not block that queue; calling
+    /// `stop()` from it is safe, and delivery is always asynchronous with
+    /// respect to the rebuild that produced the event, so doing so cannot
+    /// re-enter a rebuild still on the stack.
+    public var onEvent: ((String) -> Void)?
+
     public var durationSeconds: Double { writer?.durationSeconds ?? 0 }
 
     public init(outputURL: URL) { self.outputURL = outputURL }
 
+    /// Starts capture. Call from the main thread; the work runs on
+    /// `AudioControl.queue` and this waits for it.
     public func start() throws {
-        try buildCaptureChain()
-        installDefaultDeviceListener()
+        try AudioControl.sync {
+            try buildCaptureChain()
+            installDefaultDeviceListener()
+        }
+    }
+
+    /// Stops capture and finalizes the WAV. Call from the main thread (or
+    /// from an `onEvent`/`onHealthChange` callback, which already runs on the
+    /// control queue — `AudioControl.sync` handles both).
+    ///
+    /// Everything is done synchronously before returning: the `stopped` latch,
+    /// cancelling a scheduled rebuild, removing both CoreAudio listeners,
+    /// tearing the capture chain down (which is documented to block until no
+    /// further IOProc callback can fire), then finalizing the writer. Any
+    /// rebuild already queued behind this call re-checks `stopped` and returns
+    /// without touching the device.
+    public func stop() {
+        AudioControl.sync {
+            stopped = true
+            // Bookkeeping only; the `stopped` latch is what stops a rebuild
+            // block that is already queued behind this one.
+            rebuildScheduled = false
+            removeDefaultDeviceListener()
+            teardownCaptureChain()
+            writer?.finalize()
+        }
     }
 
     /// Builds the tap → aggregate device → IO proc chain, or tears down
@@ -101,6 +156,7 @@ public final class SystemAudioRecorder {
     /// the pipeline to trip over. A rebuild that fails after real audio was
     /// already captured must never delete that file, so this only fires
     /// when `writer` was nil going into the attempt.
+    /// Control queue only.
     private func buildCaptureChain() throws {
         let writerExistedBeforeAttempt = writer != nil
         do {
@@ -116,6 +172,7 @@ public final class SystemAudioRecorder {
         }
     }
 
+    /// Control queue only.
     private func buildCaptureChainOrThrow() throws {
         // 1. Global mixdown tap over all processes (exclude none).
         let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
@@ -226,84 +283,133 @@ public final class SystemAudioRecorder {
     /// device, because its nominal rate is exactly the value fed into
     /// `ioASBD.mSampleRate`: if that has not changed, our format is still
     /// correct.
+    /// Control queue only.
     private func installSampleRateListener(on deviceID: AudioObjectID) {
         guard deviceID != kAudioObjectUnknown, rateListenerBlock == nil else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
+        var address = Self.nominalSampleRateAddress
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            // Deferred rather than rebuilt inline: the rebuild's teardown
-            // removes this very listener block, and a block must not remove
-            // itself while it is executing. The `stopped` guard is rechecked
-            // inside, since stop() can run between this notification and the
-            // deferred work.
-            DispatchQueue.main.async {
-                guard !self.stopped else { return }
-                self.rebuildAfterFormatChange()
-            }
+            guard let self, !self.stopped else { return }
+            self.requestRebuild(reason: "sample rate changed")
+        }
+        let status = AudioObjectAddPropertyListenerBlock(
+            deviceID, &address, AudioControl.queue, block)
+        guard status == noErr else {
+            emit("could not watch the capture device's sample rate "
+                 + "(OSStatus \(status)); a Bluetooth A2DP/SCO flip may go unnoticed")
+            return
         }
         rateListenerBlock = block
         rateListenerDeviceID = deviceID
-        AudioObjectAddPropertyListenerBlock(deviceID, &address, .main, block)
     }
 
+    /// Control queue only.
     private func removeSampleRateListener() {
         guard let block = rateListenerBlock,
               rateListenerDeviceID != kAudioObjectUnknown else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(rateListenerDeviceID, &address, .main, block)
+        var address = Self.nominalSampleRateAddress
+        let status = AudioObjectRemovePropertyListenerBlock(
+            rateListenerDeviceID, &address, AudioControl.queue, block)
+        if status != noErr {
+            emit("could not remove the sample-rate listener (OSStatus \(status))")
+        }
         rateListenerBlock = nil
         rateListenerDeviceID = AudioObjectID(kAudioObjectUnknown)
     }
 
+    private static var nominalSampleRateAddress: AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+    }
+
+    /// Funnels both recovery signals into one debounced, deferred rebuild.
+    ///
+    /// Deferred rather than rebuilt inline because the rebuild's teardown
+    /// removes the very listener blocks that call this, and a block must not
+    /// remove itself while it is executing. The 0.25s delay before the
+    /// deferred block runs is what actually does the coalescing: a live test
+    /// showed a Bluetooth SCO transition fire three separate signals within
+    /// about a second, and without the delay each one raced in as its own
+    /// rebuild before `rebuildScheduled` could gate the next. The `stopped`
+    /// guard is rechecked inside the deferred work, since `stop()` can run in
+    /// between.
+    /// Control queue only.
+    private func requestRebuild(reason: String) {
+        guard !stopped, !rebuildScheduled else { return }
+        rebuildScheduled = true
+        AudioControl.queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            self.rebuildScheduled = false
+            guard !self.stopped else { return }
+            self.rebuildAfterFormatChange(reason: reason)
+        }
+    }
+
     /// Teardown + rebuild keeping the same WAV file open. Shared by the
     /// default-output-device path and the sample-rate path, which need
-    /// identical handling: both invalidate the capture format.
-    private func rebuildAfterFormatChange() {
+    /// identical handling: both invalidate the capture format. `reason` is
+    /// a short label for the triggering signal, used only for the emitted
+    /// event text.
+    /// Control queue only.
+    private func rebuildAfterFormatChange(reason: String) {
+        emit("\(reason); rebuilding audio capture chain")
         teardownCaptureChain()
         do {
             try buildCaptureChain()
             setHealthy(true)
+            if let tapFormat {
+                emit("audio capture chain rebuilt (rate=\(Int(tapFormat.sampleRate)), "
+                     + "ch=\(tapFormat.channelCount))")
+            }
         } catch {
             setHealthy(false)
+            emit("audio capture chain rebuild failed: \(error.localizedDescription)")
         }
     }
 
     /// The default output device changed (e.g. headphones plugged in):
     /// tear the chain down and rebuild it, keeping the same WAV file open.
+    /// Control queue only.
     private func installDefaultDeviceListener() {
         guard !defaultDeviceListenerInstalled else { return }
-        defaultDeviceListenerInstalled = true
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
+        var address = Self.defaultOutputAddress
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self, !self.stopped else { return }
-            self.rebuildAfterFormatChange()
+            self.requestRebuild(reason: "output device changed")
+        }
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, AudioControl.queue, block)
+        guard status == noErr else {
+            emit("could not watch the default output device (OSStatus \(status)); "
+                 + "device-change recovery is degraded")
+            return
         }
         defaultDeviceListenerBlock = block
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, .main, block)
+        defaultDeviceListenerInstalled = true
     }
 
+    /// Control queue only.
     private func removeDefaultDeviceListener() {
         guard defaultDeviceListenerInstalled, let block = defaultDeviceListenerBlock else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, .main, block)
+        var address = Self.defaultOutputAddress
+        let status = AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, AudioControl.queue, block)
+        if status != noErr {
+            emit("could not remove the default-output listener (OSStatus \(status))")
+        }
         defaultDeviceListenerBlock = nil
         defaultDeviceListenerInstalled = false
     }
 
+    private static var defaultOutputAddress: AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+    }
+
+    /// Control queue only.
     private func teardownCaptureChain() {
         // Symmetric with installSampleRateListener at the end of every
         // successful build, and removed before the device it watches is
@@ -324,6 +430,8 @@ public final class SystemAudioRecorder {
         }
     }
 
+    /// Safe from the HAL IO thread: takes `stateLock` briefly and hands the
+    /// callback to the control queue rather than invoking it inline.
     private func setHealthy(_ value: Bool) {
         let changed: Bool = stateLock.withLock {
             guard _isHealthy != value else { return false }
@@ -331,14 +439,13 @@ public final class SystemAudioRecorder {
             return true
         }
         guard changed else { return }
-        DispatchQueue.main.async { self.onHealthChange?(value) }
+        // Strong capture: an event queued moments before the last reference
+        // goes away should still reach the log rather than vanish.
+        AudioControl.async { self.onHealthChange?(value) }
     }
 
-    public func stop() {
-        stopped = true
-        removeDefaultDeviceListener()
-        teardownCaptureChain()
-        writer?.finalize()
+    private func emit(_ message: String) {
+        AudioControl.async { self.onEvent?(message) }
     }
 
     static func defaultOutputDeviceUID() throws -> String {

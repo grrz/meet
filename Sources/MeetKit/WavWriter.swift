@@ -60,7 +60,11 @@ public final class WavWriter {
     private let url: URL
     private let targetFormat: AVAudioFormat
     private var converter: AVAudioConverter?
-    private var sourceFormat: AVAudioFormat
+    /// The format the current converter expects. Readable so a caller with
+    /// several possible buffer sources (see `MicRecorder`'s engine
+    /// generations) can drop a buffer that no longer matches instead of
+    /// feeding the converter a format it was not built for.
+    public private(set) var sourceFormat: AVAudioFormat
     private var closed = false
     /// Bytes of PCM payload written so far — the `data` chunk's size.
     private var dataBytes: UInt32 = 0

@@ -92,6 +92,42 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertNil(loaded.systemStartedAt)
     }
 
+    func testPerTrackDurationsRoundTrip() throws {
+        let store = SessionStore(rootDir: root)
+        let session = try store.createSession(at: Date())
+        var meta = SessionMeta(startedAt: Date())
+        meta.micDurationSeconds = 1234.5
+        meta.systemDurationSeconds = 1230.0
+        try session.saveMeta(meta)
+
+        let loaded = try session.loadMeta()
+        XCTAssertEqual(loaded.micDurationSeconds ?? 0, 1234.5, accuracy: 0.001)
+        XCTAssertEqual(loaded.systemDurationSeconds ?? 0, 1230.0, accuracy: 0.001)
+    }
+
+    /// Per-track durations are optional precisely so recordings made before
+    /// they existed keep loading. A meta.json without them must decode, not
+    /// throw.
+    func testMetaWithoutPerTrackDurationsStillDecodes() throws {
+        let store = SessionStore(rootDir: root)
+        let session = try store.createSession(at: Date())
+        try """
+        {
+          "startedAt" : "2026-09-03T14:20:00Z",
+          "endedAt" : "2026-09-03T14:52:00Z",
+          "stage" : "completed",
+          "pauseIntervals" : [],
+          "audioDurationSeconds" : 1920,
+          "title" : "Legacy Call"
+        }
+        """.write(to: session.metaJSON, atomically: true, encoding: .utf8)
+
+        let loaded = try session.loadMeta()
+        XCTAssertEqual(loaded.stage, .completed)
+        XCTAssertNil(loaded.micDurationSeconds)
+        XCTAssertNil(loaded.systemDurationSeconds)
+    }
+
     func testStageOrdering() {
         XCTAssertTrue(Stage.recorded < Stage.transcribed)
         XCTAssertTrue(Stage.merged < Stage.completed)
