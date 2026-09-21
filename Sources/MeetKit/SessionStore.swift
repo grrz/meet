@@ -8,7 +8,9 @@ public struct Session: Equatable, Sendable {
     public var systemM4A: URL { directory.appendingPathComponent("system.m4a") }
     public var micJSON: URL { directory.appendingPathComponent("mic.json") }
     public var systemJSON: URL { directory.appendingPathComponent("system.json") }
-    public var transcriptMD: URL { directory.appendingPathComponent("transcript.md") }
+    public var transcriptMD: URL {
+        directory.appendingPathComponent("\(directory.lastPathComponent)_transcript.md")
+    }
     public var metaJSON: URL { directory.appendingPathComponent("meta.json") }
     public var logFile: URL { directory.appendingPathComponent("pipeline.log") }
 

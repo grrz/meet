@@ -19,6 +19,20 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: session.directory.path))
         XCTAssertTrue(session.directory.lastPathComponent.hasPrefix("2026-09-03-"))
         XCTAssertEqual(session.micWAV.lastPathComponent, "mic.wav")
+        XCTAssertEqual(session.transcriptMD.lastPathComponent,
+                       "\(session.directory.lastPathComponent)_transcript.md")
+    }
+
+    /// The collision suffix (`-2`, `-3`) lives in the folder name, so it
+    /// carries over into the transcript file name for free.
+    func testTranscriptFileNameCarriesCollisionSuffix() throws {
+        let store = SessionStore(rootDir: root)
+        let date = Date()
+        let a = try store.createSession(at: date)
+        let b = try store.createSession(at: date)
+        XCTAssertEqual(a.transcriptMD.lastPathComponent, "\(a.directory.lastPathComponent)_transcript.md")
+        XCTAssertEqual(b.transcriptMD.lastPathComponent, "\(b.directory.lastPathComponent)_transcript.md")
+        XCTAssertTrue(b.transcriptMD.lastPathComponent.hasSuffix("-2_transcript.md"))
     }
 
     func testCollisionAppendsSuffix() throws {
