@@ -50,11 +50,11 @@ final class InteractiveUI: @unchecked Sendable {
         while !shouldQuit {
             redrawStatus()
             guard let key = readKey(timeoutMS: 1000) else { continue }
-            switch key {
-            case UInt8(ascii: "z"): toggleRecording()
-            case UInt8(ascii: " "): handleSpace()
-            case UInt8(ascii: "q"), 0x04: quit()          // 0x04 = Ctrl+D
-            default: break
+            switch KeyCommand.parse(key) {
+            case .toggleRecording: toggleRecording()
+            case .space: handleSpace()
+            case .quit: quit()
+            case nil: break
             }
         }
 
@@ -91,13 +91,37 @@ final class InteractiveUI: @unchecked Sendable {
     }
 
     /// poll stdin with a timeout so the status line refreshes every second.
-    private func readKey(timeoutMS: Int32) -> UInt8? {
+    /// Reads one full UTF-8 scalar, not just one byte: a non-US keyboard
+    /// layout sends `z`/`q` as two-byte sequences (e.g. `я`/`й` on a Russian
+    /// layout), and `KeyCommand.parse` needs the whole character to match.
+    private func readKey(timeoutMS: Int32) -> String? {
         var fds = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
         let result = poll(&fds, 1, timeoutMS)
         guard result > 0, fds.revents & Int16(POLLIN) != 0 else { return nil }
-        var byte: UInt8 = 0
-        let n = read(STDIN_FILENO, &byte, 1)
-        return n == 1 ? byte : nil
+        var first: UInt8 = 0
+        guard read(STDIN_FILENO, &first, 1) == 1 else { return nil }
+
+        let sequenceLength: Int
+        switch first {
+        case 0xF0...0xF7: sequenceLength = 4
+        case 0xE0...0xEF: sequenceLength = 3
+        case 0xC0...0xDF: sequenceLength = 2
+        default: sequenceLength = 1
+        }
+
+        var bytes = [first]
+        while bytes.count < sequenceLength {
+            // The continuation bytes of a multi-byte scalar arrive back to
+            // back with the lead byte, so they're already buffered by the
+            // time we get here — no timeout needed on this poll.
+            var continuationFDs = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+            var next: UInt8 = 0
+            guard poll(&continuationFDs, 1, 0) > 0,
+                  continuationFDs.revents & Int16(POLLIN) != 0,
+                  read(STDIN_FILENO, &next, 1) == 1 else { break }
+            bytes.append(next)
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     private func installSignalHandler() {
@@ -123,11 +147,24 @@ final class InteractiveUI: @unchecked Sendable {
             recording = nil
             do {
                 let session = try active.stop()
-                enqueuePipeline(for: session)
+                if active.elapsedSeconds < config.minDurationSeconds {
+                    // The one deliberate exception to "audio is sacred": a
+                    // recording shorter than the threshold was almost
+                    // certainly an accidental keypress, not a meeting.
+                    try? FileManager.default.removeItem(at: session.directory)
+                    printLine("discarded: \(Int(active.elapsedSeconds)) s < \(Int(config.minDurationSeconds)) s")
+                } else {
+                    enqueuePipeline(for: session)
+                }
             } catch {
                 printLine("error stopping recording: \(error.localizedDescription)")
             }
         } else {
+            // Starting blocks the key loop for a couple of seconds (tap +
+            // engine start inside RecordingSession.init); acknowledge the
+            // keypress immediately so it doesn't look ignored.
+            print("\r\u{1B}[K◌ starting…", terminator: "")
+            fflush(stdout)
             do {
                 recording = try RecordingSession(store: store, config: config)
                 micStallDetector = StallDetector()
@@ -210,6 +247,8 @@ final class InteractiveUI: @unchecked Sendable {
             micWasStalled = micStalled
             systemWasStalled = systemStalled
 
+            let micPeak = recording.takeMicPeak()
+            let systemPeak = recording.takeSystemPeak()
             if recording.isPaused {
                 left = "‖ paused \(time)"
             } else {
@@ -218,7 +257,13 @@ final class InteractiveUI: @unchecked Sendable {
                 // looks healthy but stopped producing audio.
                 let micMark = !recording.micHealthy ? "✗" : (micStalled ? "⚠" : "✓")
                 let sysMark = !recording.systemHealthy ? "✗" : (systemStalled ? "⚠" : "✓")
-                left = "● rec \(time)  mic \(micMark)  system \(sysMark)"
+                let micGlyph = LevelGlyph.glyph(forPeak: micPeak)
+                let sysGlyph = LevelGlyph.glyph(forPeak: systemPeak)
+                var micLabel = "mic \(micMark)\(micGlyph)"
+                if let micDeviceName = recording.micDeviceName {
+                    micLabel += " \(Self.truncate(micDeviceName, to: 24))"
+                }
+                left = "● rec \(time)  \(micLabel)  system \(sysMark)\(sysGlyph)"
             }
         }
         let (job, pending) = stateLock.withLock { (currentJob, pendingJobs) }
@@ -233,5 +278,10 @@ final class InteractiveUI: @unchecked Sendable {
     /// Print a full line above the status line.
     private func printLine(_ text: String) {
         print("\r\u{1B}[K\(text)")
+    }
+
+    private static func truncate(_ text: String, to limit: Int) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)) + "…"
     }
 }
