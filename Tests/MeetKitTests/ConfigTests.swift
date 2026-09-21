@@ -9,6 +9,18 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(cfg.transcript.speakerMe, "Me")
         XCTAssertFalse(cfg.debug)
         XCTAssertTrue(cfg.saveAudio)
+        XCTAssertEqual(cfg.minDurationSeconds, 10)
+    }
+
+    func testMinDurationSecondsOverride() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("config.toml")
+        try "min_duration_seconds = 30".write(to: path, atomically: true, encoding: .utf8)
+
+        let cfg = try Config.load(path: path)
+        XCTAssertEqual(cfg.minDurationSeconds, 30)
     }
 
     func testDebugAndSaveAudioOverride() throws {
@@ -45,6 +57,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(cfg.sttCommand, Config.default.sttCommand) // default kept
         XCTAssertFalse(cfg.debug)                                 // default kept
         XCTAssertTrue(cfg.saveAudio)                              // default kept
+        XCTAssertEqual(cfg.minDurationSeconds, 10)                // default kept
     }
 
     func testTildeExpansion() throws {

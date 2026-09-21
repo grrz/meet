@@ -7,13 +7,15 @@ public struct Config: Equatable, Sendable {
     public var transcript: TranscriptOptions
     public var debug: Bool
     public var saveAudio: Bool
+    public var minDurationSeconds: Double
 
     public static let `default` = Config(
         recordingsDir: URL(fileURLWithPath: NSString(string: "~/MeetingRecordings").expandingTildeInPath),
         sttCommand: "parakeet-mlx {audio} --output-format json --output-dir {outdir}",
         transcript: TranscriptOptions(),
         debug: false,
-        saveAudio: true
+        saveAudio: true,
+        minDurationSeconds: 10
     )
 
     public static func load(path: URL) throws -> Config {
@@ -36,6 +38,8 @@ public struct Config: Equatable, Sendable {
         }
         if let debug = table["debug"]?.bool { cfg.debug = debug }
         if let saveAudio = table["save_audio"]?.bool { cfg.saveAudio = saveAudio }
+        if let minDuration = table["min_duration_seconds"]?.double { cfg.minDurationSeconds = minDuration }
+        if let minDuration = table["min_duration_seconds"]?.int { cfg.minDurationSeconds = Double(minDuration) }
         return cfg
     }
 
