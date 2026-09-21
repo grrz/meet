@@ -49,15 +49,16 @@ public enum Transcript {
             durationLabel = "\(Int((durationSeconds / 60).rounded())) min"
         }
 
-        var lines = ["# \(title) (\(durationLabel))", ""]
+        let header = "# \(title) (\(durationLabel))"
+        let body: String
         if utterances.isEmpty {
-            lines.append("_(no speech recognized)_")
+            body = "_(no speech recognized)_"
         } else {
-            for u in utterances {
-                lines.append("\(timecode(u.start)) \(u.speaker): \(u.text)")
-            }
+            body = utterances
+                .map { "\(timecode($0.start)) \($0.speaker): \($0.text)" }
+                .joined(separator: "\n\n")
         }
-        return lines.joined(separator: "\n") + "\n"
+        return header + "\n\n" + body + "\n"
     }
 
     public static func timecode(_ seconds: Double) -> String {

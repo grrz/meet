@@ -13,6 +13,7 @@ final class TranscriptTests: XCTestCase {
         # Call 2026-09-03 14:20 (52 min)
 
         00:00:03 Them: Hi Greg, can you hear me?
+
         00:00:06 Me: Yes, loud and clear.
 
         """)
