@@ -84,12 +84,33 @@ current recording:
 | `space` | Start a recording when idle; pause / resume the current one (never stops it) |
 | `q`     | Quit (stops any active recording first)  |
 
+The terminal delivers characters, not physical keys, so on a Russian
+keyboard layout `я` and `й` work the same as `z` and `q`.
+
 Stopping a recording queues it for transcription in the background, so you
 can start the next recording immediately; `meet` prints `✓ <session>:
 transcript ready` when a transcript finishes assembling. Pressing Ctrl+C
 once waits for any in-flight transcriptions to finish before exiting;
 pressing it a second time exits immediately (the recorded audio is safe
 either way — nothing is deleted, and `meet process` catches up later).
+Stopping a recording shorter than `min_duration_seconds` (default 10s) —
+almost always an accidental keypress rather than a real meeting — discards
+it instead: the session folder is deleted and nothing is queued for
+transcription.
+
+While a recording is active, the status line shows each track's health and
+level:
+
+```
+● rec 00:12:34  mic ✓⣤ MacBook Pro Microphone  system ✓⣿
+```
+
+`✓` means the track is recording normally, `⚠` means it looks healthy but
+has stopped producing audio (check the device), and `✗` means the recorder
+itself reported a failure. The braille glyph right after each mark is a
+level meter (`_` silence, `⣀`/`⣤`/`⣶` increasingly loud, `⣿` loud) sampled
+about once a second; the mic side also shows which input device is
+currently being recorded.
 
 To (re)run the transcription pipeline over recordings that didn't finish —
 after a crash, an STT engine failure, or a config change:
@@ -135,6 +156,9 @@ optional and falls back to the default shown below.
 ```toml
 # Where session folders are created.
 recordings_dir = "~/MeetingRecordings"
+# Recordings shorter than this are discarded (folder deleted, no
+# transcription) when stopped — almost always an accidental keypress.
+min_duration_seconds = 10
 
 [stt]
 # Template for the STT engine invocation. {audio} and {outdir} are
@@ -143,14 +167,15 @@ command = "parakeet-mlx {audio} --output-format json --output-dir {outdir}"
 
 [transcript]
 # Consecutive segments from the same speaker with a gap shorter than this
-# (in seconds) are merged into one utterance in transcript.md.
+# (in seconds) are merged into one utterance in <session>_transcript.md.
 merge_gap_seconds = 2.0
-# Speaker labels used in transcript.md.
+# Speaker labels used in <session>_transcript.md.
 speaker_me = "Me"
 speaker_them = "Them"
 
 # When true, keeps every intermediate file (mic.json, system.json,
-# pipeline.log) instead of deleting them once transcript.md is written.
+# pipeline.log) instead of deleting them once <session>_transcript.md is
+# written.
 # Useful when debugging the STT engine or a transcript that looks off.
 # Overrides save_audio below — audio is always compressed and kept.
 debug = false
@@ -168,9 +193,9 @@ depends on `debug` and `save_audio` — `meta.json` is always kept:
 
 | `debug` | `save_audio` | Folder ends up with |
 |---------|--------------|----------------------|
-| `true`  | (ignored)    | transcript.md, mic.m4a, system.m4a, mic.json, system.json, pipeline.log, meta.json |
-| `false` | `true` (default) | transcript.md, mic.m4a, system.m4a, meta.json |
-| `false` | `false`      | transcript.md, meta.json |
+| `true`  | (ignored)    | `<session>_transcript.md`, mic.m4a, system.m4a, mic.json, system.json, pipeline.log, meta.json |
+| `false` | `true` (default) | `<session>_transcript.md`, mic.m4a, system.m4a, meta.json |
+| `false` | `false`      | `<session>_transcript.md`, meta.json |
 
 `save_audio = false` deletes the WAVs outright — no m4a is ever produced —
 so a session recorded that way has no audio left afterward: `meet process
@@ -221,11 +246,15 @@ start time:
 
 ```
 ~/MeetingRecordings/2026-09-03-1420/
-├── mic.m4a          # your track, compressed after transcription
-├── system.m4a       # their track
-├── transcript.md    # the assembled, human-readable transcript
-└── meta.json        # start/end times, pause intervals, pipeline stage, engine used
+├── mic.m4a                          # your track, compressed after transcription
+├── system.m4a                       # their track
+├── 2026-09-03-1420_transcript.md    # the assembled, human-readable transcript
+└── meta.json                        # start/end times, pause intervals, pipeline stage, engine used
 ```
+
+The transcript file is named after its session folder (collision suffixes
+like `-2` carry over automatically); sessions recorded before this naming
+changed keep their original plain `transcript.md`.
 
 This is the default (`debug = false`, `save_audio = true`) layout once a
 session reaches `completed`. `mic.wav` / `system.wav` exist during and
@@ -245,7 +274,7 @@ so a crash or engine failure always leaves a clear resume point:
 1. **recorded** — both WAV tracks are on disk; nothing transcribed yet.
 2. **transcribed** — `mic.json` and `system.json` exist (empty `[]` for
    any track that never recorded any audio).
-3. **merged** — `transcript.md` has been assembled from the two JSONs.
+3. **merged** — `<session>_transcript.md` has been assembled from the two JSONs.
 4. **completed** — audio and intermediates are cleaned up per `debug` and
    `save_audio` (see [Session folder cleanup](#session-folder-cleanup)).
 
