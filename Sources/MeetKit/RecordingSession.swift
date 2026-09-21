@@ -24,6 +24,10 @@ public final class RecordingSession {
     public var micDurationSeconds: Double { mic.durationSeconds }
     public var systemDurationSeconds: Double { system.durationSeconds }
     public var elapsedSeconds: Double { max(micDurationSeconds, systemDurationSeconds) }
+    public var micDeviceName: String? { mic.inputDeviceName }
+
+    public func takeMicPeak() -> Double { mic.takePeak() }
+    public func takeSystemPeak() -> Double { system.takePeak() }
 
     /// Creates the session folder, writes the initial `meta.json` (stage
     /// `.recording`), and starts both recorders.

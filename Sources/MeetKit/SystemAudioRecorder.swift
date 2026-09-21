@@ -113,6 +113,11 @@ public final class SystemAudioRecorder {
 
     public init(outputURL: URL) { self.outputURL = outputURL }
 
+    /// The loudest sample written since the last call, 0 before `start()`.
+    /// Safe to poll from the main thread once a second for a status-line
+    /// meter.
+    public func takePeak() -> Double { writer?.takePeak() ?? 0 }
+
     /// Starts capture. Call from the main thread; the work runs on
     /// `AudioControl.queue` and this waits for it.
     public func start() throws {

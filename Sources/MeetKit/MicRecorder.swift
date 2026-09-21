@@ -85,6 +85,7 @@ public final class MicRecorder {
     private var _paused = false
     private var _isHealthy = true
     private var _stopped = false
+    private var _inputDeviceName: String?
     /// Monotonic id of the current engine/tap pair, bumped on every engine
     /// creation. Every tap block and configuration-change observer captures
     /// the generation it belongs to, so work arriving from a discarded engine
@@ -132,6 +133,10 @@ public final class MicRecorder {
 
     public var isHealthy: Bool { stateLock.withLock { _isHealthy } }
 
+    /// The default input device's name as of the last successful engine
+    /// start/rebuild. Read from the main thread by the status line.
+    public var inputDeviceName: String? { stateLock.withLock { _inputDeviceName } }
+
     /// Set once by `stop()`; checked by the device-change recovery path so
     /// a recovery notification that was already queued before `stop()` ran
     /// can't re-light the engine after the caller considers capture over.
@@ -147,6 +152,11 @@ public final class MicRecorder {
     public init(outputURL: URL) {
         self.outputURL = outputURL
     }
+
+    /// The loudest sample written since the last call, 0 before `start()`.
+    /// Safe to poll from the main thread once a second for a status-line
+    /// meter.
+    public func takePeak() -> Double { writer?.takePeak() ?? 0 }
 
     /// Starts capture. Call from the main thread; the work runs on
     /// `AudioControl.queue` and this waits for it.
@@ -211,6 +221,7 @@ public final class MicRecorder {
         // current one, which can feed itself indefinitely.
         subscribeToConfigurationChange(engine: newEngine, generation: generation)
         installDefaultInputDeviceListener()
+        refreshInputDeviceName()
     }
 
     /// Control queue only.
@@ -369,6 +380,35 @@ public final class MicRecorder {
             mElement: kAudioObjectPropertyElementMain)
     }
 
+    /// Reads the default input device's name from CoreAudio and stores it
+    /// under `stateLock` (read from the main thread by the status line).
+    /// Called after every successful engine start/rebuild. Control queue
+    /// only.
+    @discardableResult
+    private func refreshInputDeviceName() -> String? {
+        let name = Self.currentInputDeviceName()
+        stateLock.withLock { _inputDeviceName = name }
+        return name
+    }
+
+    private static func currentInputDeviceName() -> String? {
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var address = defaultInputAddress
+        var status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID)
+        guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
+
+        var name: CFString = "" as CFString
+        size = UInt32(MemoryLayout<CFString>.size)
+        address.mSelector = kAudioObjectPropertyName
+        status = withUnsafeMutablePointer(to: &name) { pointer in
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, pointer)
+        }
+        guard status == noErr else { return nil }
+        return name as String
+    }
+
     /// Funnels both recovery signals into one debounced, deferred rebuild.
     ///
     /// Deferring instead of rebuilding inline matters for the listener block:
@@ -436,8 +476,9 @@ public final class MicRecorder {
             try newEngine.start()
             subscribeToConfigurationChange(engine: newEngine, generation: generation)
             setHealthy(true)
+            let deviceName = refreshInputDeviceName()
             emit("audio engine rebuilt (rate=\(Int(newFormat.sampleRate)), "
-                 + "ch=\(newFormat.channelCount))")
+                 + "ch=\(newFormat.channelCount), device=\(deviceName ?? "unknown"))")
         } catch {
             // Release the engine that would not start, both to free a
             // Bluetooth headset and so the next signal starts from scratch.
