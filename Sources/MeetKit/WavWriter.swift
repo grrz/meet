@@ -70,8 +70,24 @@ public final class WavWriter {
     private var dataBytes: UInt32 = 0
     public private(set) var framesWritten: AVAudioFramePosition = 0
 
+    /// Guards `peakSinceLastRead`, written from the audio thread on every
+    /// `append` and read from the main thread by `takePeak()`.
+    private let peakLock = NSLock()
+    private var peakSinceLastRead: Double = 0
+
     public var durationSeconds: Double {
         Double(framesWritten) / Self.targetSampleRate
+    }
+
+    /// Returns the loudest sample (as a fraction of full scale, 0...1)
+    /// written since the last call, then resets it to 0. Cheap enough to
+    /// poll once a second for a status-line meter.
+    public func takePeak() -> Double {
+        peakLock.withLock {
+            let value = peakSinceLastRead
+            peakSinceLastRead = 0
+            return value
+        }
     }
 
     public init(url: URL, sourceFormat: AVAudioFormat) throws {
@@ -212,12 +228,29 @@ public final class WavWriter {
     /// fields, keeping the file self-consistent at every instant.
     private func append(_ buffer: AVAudioPCMBuffer) throws {
         guard let channelData = buffer.int16ChannelData, buffer.frameLength > 0 else { return }
+        recordPeak(channelData[0], frameCount: Int(buffer.frameLength))
         // Mono: one channel, so interleaved and deinterleaved layouts coincide.
         let byteCount = Int(buffer.frameLength) * MemoryLayout<Int16>.size
         try writeAll(UnsafeRawPointer(channelData[0]), count: byteCount)
         dataBytes &+= UInt32(byteCount)
         framesWritten += AVAudioFramePosition(buffer.frameLength)
         try updateSizeFields()
+    }
+
+    /// One linear scan over the int16 samples, no allocation — cheap enough
+    /// for the audio thread. `Int16.min`'s magnitude doesn't fit in `Int16`,
+    /// so it's clamped to `Int16.max` rather than promoted to a wider type.
+    private func recordPeak(_ samples: UnsafeMutablePointer<Int16>, frameCount: Int) {
+        var peakSample: Int16 = 0
+        for i in 0..<frameCount {
+            let sample = samples[i]
+            let magnitude = sample == Int16.min ? Int16.max : abs(sample)
+            if magnitude > peakSample { peakSample = magnitude }
+        }
+        let peak = Double(peakSample) / Double(Int16.max)
+        peakLock.withLock {
+            if peak > peakSinceLastRead { peakSinceLastRead = peak }
+        }
     }
 
     private func writeInitialHeader() throws {

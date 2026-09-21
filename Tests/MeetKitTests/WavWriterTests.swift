@@ -152,6 +152,45 @@ final class WavWriterTests: XCTestCase {
         XCTAssertEqual(Double(readBack.length) / 48000, 1.0, accuracy: 0.02)
     }
 
+    // MARK: - real-time peak tracking
+
+    func testTakePeakIsZeroBeforeAnyWrite() throws {
+        let source = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("w-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = try WavWriter(url: url, sourceFormat: source)
+        XCTAssertEqual(writer.takePeak(), 0)
+        writer.finalize()
+    }
+
+    func testTakePeakReflectsLoudestSampleSinceLastRead() throws {
+        let source = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("w-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = try WavWriter(url: url, sourceFormat: source)
+        try writer.write(makeSine(format: source, frames: 4800, freq: 440)) // amplitude 0.5
+        // A full sine cycle at this amplitude peaks near 0.5 of full scale.
+        XCTAssertEqual(writer.takePeak(), 0.5, accuracy: 0.05)
+        writer.finalize()
+    }
+
+    func testTakePeakResetsAfterRead() throws {
+        let source = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("w-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = try WavWriter(url: url, sourceFormat: source)
+        try writer.write(makeSine(format: source, frames: 4800, freq: 440))
+        _ = writer.takePeak()
+        XCTAssertEqual(writer.takePeak(), 0)
+        writer.finalize()
+    }
+
     func testInitThrowsWhenConverterCannotBeCreated() {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("w-\(UUID().uuidString).wav")
