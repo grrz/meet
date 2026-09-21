@@ -151,8 +151,12 @@ final class InteractiveUI: @unchecked Sendable {
                     // The one deliberate exception to "audio is sacred": a
                     // recording shorter than the threshold was almost
                     // certainly an accidental keypress, not a meeting.
-                    try? FileManager.default.removeItem(at: session.directory)
-                    printLine("discarded: \(Int(active.elapsedSeconds)) s < \(Int(config.minDurationSeconds)) s")
+                    do {
+                        try FileManager.default.removeItem(at: session.directory)
+                        printLine("discarded: \(Int(active.elapsedSeconds)) s < \(Int(config.minDurationSeconds)) s")
+                    } catch {
+                        printLine("could not discard \(session.directory.lastPathComponent): \(error.localizedDescription)")
+                    }
                 } else {
                     enqueuePipeline(for: session)
                 }
